@@ -1,8 +1,8 @@
 import logging
 import os
 import asyncio
-import sys
-import re
+import sys # Import sys for sys.exit
+import re # Added for email validation
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -10,6 +10,10 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 import asyncpg
+
+# If testing locally, you might want to use python-dotenv
+# from dotenv import load_dotenv
+# load_dotenv() # This will load variables from .env file
 
 # Configure logging to provide detailed information
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -24,6 +28,7 @@ DB_NAME = os.getenv("DB_NAME")
 DB_HOST = os.getenv("DB_HOST")
 
 # Crucial check: Exit if BOT_TOKEN is not set, as the bot cannot function without it.
+# We keep this as it's a fundamental requirement.
 if not API_TOKEN:
     logger.critical("BOT_TOKEN environment variable is NOT SET. Please set it in Render.")
     sys.exit("Critical Error: BOT_TOKEN is missing. Exiting application.")
@@ -40,9 +45,13 @@ async def create_db_pool():
     Establishes and returns a PostgreSQL database connection pool using asyncpg.
     Ensures all necessary DB environment variables are set.
     """
+    # Changed to logger.error instead of sys.exit to allow bot to potentially start
+    # if DB is not immediately critical for a simple bot, but for your use case,
+    # DB is critical, so we will still exit if variables are missing.
     if not all([DB_USER, DB_PASSWORD, DB_NAME, DB_HOST]):
         logger.critical("One or more database environment variables (DB_USER, DB_PASSWORD, DB_NAME, DB_HOST) are NOT SET! Please check Render settings.")
-        sys.exit("Critical Error: Missing critical database environment variables. Cannot connect to DB. Exiting application.")
+        sys.exit("Critical Error: Missing critical database environment variables. Cannot connect to DB. Exiting application.") # Still exit here
+
     try:
         pool = await asyncpg.create_pool(
             user=DB_USER,
@@ -50,13 +59,15 @@ async def create_db_pool():
             database=DB_NAME,
             host=DB_HOST,
             min_size=1,
-            max_size=10
+            max_size=10,
+            timeout=30 # Add a timeout for connection attempts
         )
         logger.info("Database connection pool created successfully.")
         return pool
     except Exception as e:
         logger.critical(f"Failed to create database pool: {e}", exc_info=True)
-        sys.exit(f"Critical Error: Failed to create database pool: {e}")
+        # We will not sys.exit here, instead main() will check if db_pool is None
+        return None # Return None if pool creation fails
 
 async def init_db():
     """
@@ -64,6 +75,10 @@ async def init_db():
     Ensures a unique constraint on 'telegram_id'.
     Updated to include new fields: password, age, experience, capital.
     """
+    if db_pool is None:
+        logger.error("Cannot initialize database: DB pool is not available.")
+        return False # Indicate failure
+
     try:
         async with db_pool.acquire() as conn:
             await conn.execute('''
@@ -79,9 +94,11 @@ async def init_db():
                 );
             ''')
         logger.info("Database table 'users' checked/created successfully.")
+        return True # Indicate success
     except Exception as e:
         logger.critical(f"Failed to initialize database table 'users': {e}", exc_info=True)
-        sys.exit(f"Critical Error: Failed to initialize database table: {e}")
+        # We will not sys.exit here, main() will handle it
+        return False # Indicate failure
 
 # --- FSM States ---
 class UserData(StatesGroup):
@@ -136,98 +153,4 @@ async def process_email(message: types.Message, state: FSMContext):
     await state.set_state(UserData.waiting_password) # Move to the next state
 
 @dp.message(UserData.waiting_password, F.text)
-async def process_password(message: types.Message, state: FSMContext):
-    """
-    Handles the user's password input. Stores it and moves to the next state.
-    (يمكنك إضافة تحقق أقوى لكلمة المرور هنا)
-    """
-    password = message.text
-    if len(password) < 6: # مثال على تحقق بسيط
-        await message.reply("كلمة المرور قصيرة جدًا. يجب أن تكون 6 أحرف على الأقل:")
-        return
-
-    await state.update_data(password=password)
-    logger.info(f"User {message.from_user.id} provided password.")
-    await message.answer("✅ تم استلام كلمة المرور.\nالرجاء أدخل عمرك (رقم):")
-    await state.set_state(UserData.waiting_age)
-
-# --- هنا يجب أن تضيف معالجات للحالات الأخرى (waiting_age, waiting_experience, waiting_capital, waiting_payment) ---
-# مثال لمعالج العمر:
-@dp.message(UserData.waiting_age, F.text)
-async def process_age(message: types.Message, state: FSMContext):
-    try:
-        age = int(message.text)
-        if not (0 < age < 100): # تحقق بسيط للعمر المنطقي
-            await message.reply("❌ الرجاء إدخال عمر صالح (رقم بين 1 و 99):")
-            return
-        await state.update_data(age=age)
-        logger.info(f"User {message.from_user.id} provided age: {age}")
-        await message.answer("✅ تم استلام العمر.\nالرجاء أدخل مستوى خبرتك في التجارة الإلكترونية:")
-        await state.set_state(UserData.waiting_experience)
-    except ValueError:
-        await message.reply("❌ الرجاء إدخال رقم صحيح لعمرك:")
-
-# مثال لمعالج الخبرة:
-@dp.message(UserData.waiting_experience, F.text)
-async def process_experience(message: types.Message, state: FSMContext):
-    experience = message.text
-    if not experience.strip():
-        await message.reply("❌ الرجاء وصف مستوى خبرتك:")
-        return
-    await state.update_data(experience=experience)
-    logger.info(f"User {message.from_user.id} provided experience.")
-    await message.answer("✅ تم استلام مستوى الخبرة.\nالرجاء أدخل رأس المال الذي تنوي البدء به:")
-    await state.set_state(UserData.waiting_capital)
-
-# مثال لمعالج رأس المال:
-@dp.message(UserData.waiting_capital, F.text)
-async def process_capital(message: types.Message, state: FSMContext):
-    capital = message.text
-    if not capital.strip():
-        await message.reply("❌ الرجاء إدخال رأس المال:")
-        return
-    await state.update_data(capital=capital)
-    logger.info(f"User {message.from_user.id} provided capital.")
-    await message.answer("✅ تم استلام رأس المال.\nالرجاء إرسال صورة إيصال الدفع:")
-    await state.set_state(UserData.waiting_payment)
-
-# مثال لمعالج صورة الدفع (يستقبل الصور):
-@dp.message(UserData.waiting_payment, F.photo)
-async def process_payment_photo(message: types.Message, state: FSMContext):
-    photo_id = message.photo[-1].file_id # الحصول على أكبر حجم للصورة
-    await state.update_data(payment_image=photo_id)
-    logger.info(f"User {message.from_user.id} provided payment image: {photo_id}")
-    await message.answer("✅ تم استلام صورة الدفع بنجاح!")
-
-    # هنا يمكنك حفظ جميع البيانات في قاعدة البيانات
-    user_data = await state.get_data()
-    telegram_id = message.from_user.id
-    email = user_data.get('email')
-    password = user_data.get('password')
-    age = user_data.get('age')
-    experience = user_data.get('experience')
-    capital = user_data.get('capital')
-    payment_image = user_data.get('payment_image')
-
-    try:
-        async with db_pool.acquire() as conn:
-            await conn.execute('''
-                INSERT INTO users (telegram_id, email, password, age, experience, capital, payment_image)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ON CONFLICT (telegram_id) DO UPDATE
-                SET email = EXCLUDED.email,
-                    password = EXCLUDED.password,
-                    age = EXCLUDED.age,
-                    experience = EXCLUDED.experience,
-                    capital = EXCLUDED.capital,
-                    payment_image = EXCLUDED.payment_image;
-            ''', telegram_id, email, password, age, experience, capital, payment_image)
-        logger.info(f"User {telegram_id} data saved/updated successfully in DB.")
-        await message.answer("🎉 تم تسجيل بياناتك بنجاح! شكراً لك.")
-    except Exception as e:
-        logger.error(f"Failed to save user {telegram_id} data to DB: {e}", exc_info=True)
-        await message.answer("❌ حدث خطأ أثناء حفظ بياناتك. الرجاء المحاولة مرة أخرى لاحقاً.")
-
-    await state.clear() # مسح الحالة بعد اكتمال العملية
-
-# --- الد
+async def
