@@ -1,5 +1,2 @@
-aiogram==2.25.1
-aiohttp==3.8.5
-async-timeout==3.0.1
-psycopg2-binary==2.9.9
-sqlalchemy==1.4.49
+#!/usr/bin/env bash
+pip install --use-deprecated=legacy-resolver -r requirements.txt

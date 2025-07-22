@@ -1,0 +1,1 @@
+worker: ./build.sh && python main.py
