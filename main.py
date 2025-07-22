@@ -7,6 +7,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 import asyncpg
+import sys # Added for sys.exit
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -22,12 +23,10 @@ DB_HOST = os.getenv("DB_HOST")
 # Ensure API_TOKEN is set
 if not API_TOKEN:
     logger.error("BOT_TOKEN environment variable is not set. Please set it in Render.")
-    # Exiting the program is crucial if the bot cannot authenticate
-    exit("BOT_TOKEN is missing. Exiting.")
+    sys.exit("BOT_TOKEN is missing. Exiting.") # Exit if token is not set
 
 # Bot and Dispatcher setup
 bot = Bot(token=API_TOKEN)
-# Dispatcher is initialized without 'bot' directly in aiogram v3.x
 dp = Dispatcher(storage=MemoryStorage()) 
 
 # Database connection pool
@@ -44,14 +43,14 @@ async def create_db_pool():
             password=DB_PASSWORD,
             database=DB_NAME,
             host=DB_HOST,
-            min_size=1, # Minimum number of connections in the pool
-            max_size=10 # Maximum number of connections in the pool
+            min_size=1, 
+            max_size=10
         )
         logger.info("Database connection pool created successfully.")
         return pool
     except Exception as e:
         logger.critical(f"Failed to create database pool: {e}")
-        raise # Re-raise the exception to stop the application if DB fails
+        raise
 
 async def init_db():
     """Creates the 'users' table if it does not exist."""
@@ -59,7 +58,7 @@ async def init_db():
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
-                telegram_id BIGINT UNIQUE, -- Added UNIQUE constraint for telegram_id
+                telegram_id BIGINT UNIQUE,
                 email TEXT,
                 code TEXT,
                 payment_image TEXT
@@ -76,18 +75,17 @@ class UserData(StatesGroup):
 
 # --- Handlers ---
 
-@dp.message(F.command("start")) # Updated: Use F.command for filtering commands
+@dp.message(F.command("start")) # This should now correctly filter /start command
 async def send_welcome(message: types.Message, state: FSMContext):
     """Handles the /start command and initiates the email collection."""
-    logger.info(f"User {message.from_user.id} started the bot.")
+    logger.info(f"User {message.from_user.id} sent /start.")
     await message.answer("👋 مرحباً بك!\nأدخل بريدك الإلكتروني:")
     await state.set_state(UserData.waiting_email)
 
 @dp.message(UserData.waiting_email)
 async def process_email(message: types.Message, state: FSMContext):
     """Processes the user's email."""
-    # Basic email validation
-    if "@" not in message.text or "." not in message.text:
+    if not message.text or "@" not in message.text or "." not in message.text:
         await message.answer("❌ يرجى إدخال بريد إلكتروني صالح.")
         return
 
@@ -99,10 +97,13 @@ async def process_email(message: types.Message, state: FSMContext):
 @dp.message(UserData.waiting_code)
 async def process_code(message: types.Message, state: FSMContext):
     """Processes the user's secret code."""
+    if not message.text: # Ensure text is not empty
+        await message.answer("❌ يرجى إدخال رمز صالح.")
+        return
+
     await state.update_data(code=message.text)
     logger.info(f"User {message.from_user.id} entered code.")
 
-    # Inline keyboard setup for aiogram v3.x
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="📋 نسخ عنوان الدفع", callback_data="copy_address")
     ]])
@@ -114,20 +115,18 @@ async def process_code(message: types.Message, state: FSMContext):
     await message.answer("📷 أرسل لقطة الشاشة كدليل على الدفع:")
     await state.set_state(UserData.waiting_payment)
 
-@dp.message(F.photo, UserData.waiting_payment) # Use F.photo for photo content type filtering
+@dp.message(F.photo, UserData.waiting_payment) 
 async def process_payment(message: types.Message, state: FSMContext):
     """Processes the payment screenshot and saves user data."""
     data = await state.get_data()
-    file_id = message.photo[-1].file_id # Get the file_id of the largest photo
+    file_id = message.photo[-1].file_id 
 
     try:
         async with db_pool.acquire() as conn:
-            # Check if user already exists based on telegram_id
             existing_user = await conn.fetchrow(
                 "SELECT id FROM users WHERE telegram_id = $1", message.from_user.id
             )
             if existing_user:
-                # Update existing user's data
                 await conn.execute('''
                     UPDATE users
                     SET email = $2, code = $3, payment_image = $4
@@ -136,7 +135,6 @@ async def process_payment(message: types.Message, state: FSMContext):
                 logger.info(f"User {message.from_user.id} updated their payment details.")
                 await message.answer("✅ تم تحديث بيانات دفعتك. سيتم التحقق يدوياً. شكراً!")
             else:
-                # Insert new user data
                 await conn.execute('''
                     INSERT INTO users (telegram_id, email, code, payment_image)
                     VALUES ($1, $2, $3, $4)
@@ -147,14 +145,24 @@ async def process_payment(message: types.Message, state: FSMContext):
         logger.error(f"Error inserting/updating data for user {message.from_user.id}: {e}", exc_info=True)
         await message.answer("❌ حدث خطأ أثناء حفظ معلوماتك. الرجاء المحاولة مرة أخرى.")
     finally:
-        await state.clear() # Clear state after processing
+        await state.clear() 
 
-@dp.callback_query(F.data == 'copy_address') # Use F.data for callback data filtering
+@dp.callback_query(F.data == 'copy_address') 
 async def copy_address_callback(callback_query: types.CallbackQuery):
     """Handles the callback for copying the payment address."""
-    # Use callback_query.answer for inline keyboard callbacks in aiogram v3.x
     await callback_query.answer(text="📋 تم نسخ العنوان (انسخه يدوياً)", show_alert=True)
     logger.info(f"User {callback_query.from_user.id} clicked copy address.")
+
+# --- Generic handlers for unhandled messages ---
+# This handler should be placed AFTER specific handlers
+@dp.message()
+async def unhandled_message(message: types.Message):
+    """Handles any message that doesn't match other handlers."""
+    logger.warning(f"Unhandled message from user {message.from_user.id}: {message.text}")
+    # You can customize this response or remove it if you don't want the bot to reply
+    if not message.text or not message.text.startswith('/'): # Only reply if not a command or empty
+        await message.answer("عذراً، لم أفهم طلبك. يرجى البدء باستخدام الأمر /start.")
+
 
 # --- Startup and Shutdown Hooks ---
 
@@ -167,13 +175,7 @@ async def on_startup_tasks(dispatcher):
         logger.info("Bot is ready and running!")
     except Exception as e:
         logger.critical(f"Failed to start bot due to startup tasks: {e}", exc_info=True)
-        # It's critical to exit if essential services like DB cannot start
-        # Consider re-raising or sys.exit() if running as a service
-        await dispatcher.bot.send_message(
-            chat_id=os.getenv("ADMIN_CHAT_ID"), # Optional: send error to admin if you set ADMIN_CHAT_ID
-            text=f"🔴 Bot startup failed: {e}"
-        )
-        # sys.exit(1) # Uncomment if you want the process to exit immediately on startup failure
+        sys.exit(1) # Force exit if DB connection fails, as it's critical for bot function
 
 async def on_shutdown_tasks(dispatcher):
     """Tasks to run on bot shutdown."""
@@ -185,19 +187,15 @@ async def on_shutdown_tasks(dispatcher):
 # Main function to run the bot
 async def main():
     """Main function to start the bot."""
-    # Register startup and shutdown handlers
     dp.startup.register(on_startup_tasks)
     dp.shutdown.register(on_shutdown_tasks)
-
-    # Start polling, passing the bot instance to it
     await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == '__main__':
     try:
-        # Run the asynchronous main function
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped manually (KeyboardInterrupt).")
     except Exception as e:
         logger.critical(f"An unhandled error occurred during bot execution: {e}", exc_info=True)
-        
+
