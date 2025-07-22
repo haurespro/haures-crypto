@@ -42,7 +42,8 @@ async def create_db_pool():
     """
     if not all([DB_USER, DB_PASSWORD, DB_NAME, DB_HOST]):
         logger.critical("One or more database environment variables (DB_USER, DB_PASSWORD, DB_NAME, DB_HOST) are NOT SET! Please check Render settings.")
-        raise ValueError("Missing critical database environment variables. Cannot connect to DB.")
+        # Instead of raising ValueError, raise a more specific error or sys.exit
+        sys.exit("Critical Error: Missing critical database environment variables. Cannot connect to DB. Exiting application.")
     try:
         pool = await asyncpg.create_pool(
             user=DB_USER,
@@ -56,7 +57,8 @@ async def create_db_pool():
         return pool
     except Exception as e:
         logger.critical(f"Failed to create database pool: {e}", exc_info=True)
-        raise 
+        # It's better to exit here if DB connection is critical for bot function
+        sys.exit(f"Critical Error: Failed to create database pool: {e}") 
 
 async def init_db():
     """
@@ -64,20 +66,25 @@ async def init_db():
     Ensures a unique constraint on 'telegram_id'.
     Updated to include new fields: password, age, experience, capital.
     """
-    async with db_pool.acquire() as conn:
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
-                telegram_id BIGINT UNIQUE, 
-                email TEXT,
-                password TEXT, -- Added for password
-                age INT,        -- Added for age
-                experience TEXT,-- Added for experience
-                capital TEXT,   -- Added for capital
-                payment_image TEXT
-            );
-        ''')
-    logger.info("Database table 'users' checked/created successfully.")
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    telegram_id BIGINT UNIQUE, 
+                    email TEXT,
+                    password TEXT, -- Added for password
+                    age INT,        -- Added for age
+                    experience TEXT,-- Added for experience
+                    capital TEXT,   -- Added for capital
+                    payment_image TEXT
+                );
+            ''')
+        logger.info("Database table 'users' checked/created successfully.")
+    except Exception as e:
+        logger.critical(f"Failed to initialize database table 'users': {e}", exc_info=True)
+        # Exit if table creation fails, as bot won't function
+        sys.exit(f"Critical Error: Failed to initialize database table: {e}")
 
 # --- FSM States ---
 class UserData(StatesGroup):
@@ -122,7 +129,7 @@ async def process_email(message: types.Message, state: FSMContext):
     Prompts for secret code and sets the state to waiting_password.
     """
     email = message.text
-    if not re.match(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+    if not email or not re.match(r"[^@\s]+@[^@\s]+\.[^@\s]+", email): # Added check for empty message
         logger.warning(f"User {message.from_user.id} entered invalid email: {email}")
         await message.answer("❌ البريد الإلكتروني غير صالح. حاول مرة أخرى:")
         return
@@ -139,8 +146,8 @@ async def process_password(message: types.Message, state: FSMContext):
     Prompts for age and sets the state to waiting_age.
     """
     password = message.text
-    if len(password) < 8:
-        logger.warning(f"User {message.from_user.id} entered short password.")
+    if not password or len(password) < 8: # Added check for empty message
+        logger.warning(f"User {message.from_user.id} entered short or empty password.")
         await message.answer("❌ الرمز السري قصير جدًا. يجب أن يكون 8 أحرف أو أكثر:")
         return
 
@@ -155,7 +162,13 @@ async def process_age(message: types.Message, state: FSMContext):
     Processes the user's age input. Validates age and prompts for experience or ends flow.
     """
     try:
-        age = int(message.text)
+        age_text = message.text
+        if not age_text: # Check if message is empty
+            logger.warning(f"User {message.from_user.id} sent empty message for age.")
+            await message.answer("❌ الرجاء إدخال عمر صحيح (رقم فقط):")
+            return
+
+        age = int(age_text)
         if age < 18:
             logger.warning(f"User {message.from_user.id} entered age below 18: {age}. Ending flow.")
             await message.answer("⚠️ عذرًا، يجب أن يكون عمرك 18 سنة أو أكثر للمشاركة.\nروح تقرا بابا 📚!")
@@ -175,6 +188,11 @@ async def process_experience(message: types.Message, state: FSMContext):
     """
     Processes user's experience input. Prompts for capital.
     """
+    if not message.text: # Ensure there's text input
+        logger.warning(f"User {message.from_user.id} sent empty message for experience.")
+        await message.answer("❌ الرجاء الإجابة بنعم أو لا.")
+        return
+
     await state.update_data(experience=message.text)
     logger.info(f"User {message.from_user.id} entered experience: {message.text}. Prompting for capital.")
     await message.answer("💰 هل لديك رأس مال صغير لكي تبدأ التجارة الإلكترونية؟ (نعم/لا)")
@@ -185,127 +203,10 @@ async def process_capital(message: types.Message, state: FSMContext):
     """
     Processes user's capital input. Provides payment address and prompts for screenshot.
     """
-    await state.update_data(capital=message.text)
-    logger.info(f"User {message.from_user.id} entered capital: {message.text}. Prompting for payment screenshot.")
+    if not message.text: # Ensure there's text input
+        logger.warning(f"User {message.from_user.id} sent empty message for capital.")
+        await message.answer("❌ الرجاء الإجابة بنعم أو لا.")
+        return
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="📋 نسخ عنوان الدفع", callback_data="copy_address")
-    ]])
-    await message.answer(
-        "💳 أرسل المبلغ إلى هذا العنوان:\n`TLxUzr...TRC20`", 
-        parse_mode="Markdown",
-        reply_markup=keyboard
-    )
-    await message.answer("📷 أرسل لقطة الشاشة كدليل على الدفع:")
-    await state.set_state(UserData.waiting_payment) 
-
-@dp.message(F.photo, UserData.waiting_payment) 
-async def process_payment(message: types.Message, state: FSMContext):
-    """
-    Processes the payment screenshot provided by the user.
-    Saves or updates user data (Telegram ID, email, password, age, experience, capital, payment image file ID)
-    in the database. Clears the FSM state upon completion.
-    """
-    data = await state.get_data()
-    file_id = message.photo[-1].file_id 
-
-    try:
-        async with db_pool.acquire() as conn:
-            existing_user = await conn.fetchrow(
-                "SELECT id FROM users WHERE telegram_id = $1", message.from_user.id
-            )
-            if existing_user:
-                await conn.execute('''
-                    UPDATE users
-                    SET email = $2, password = $3, age = $4, experience = $5, capital = $6, payment_image = $7
-                    WHERE telegram_id = $1
-                ''', message.from_user.id, data.get('email'), data.get('password'), data.get('age'),
-                   data.get('experience'), data.get('capital'), file_id)
-                logger.info(f"User {message.from_user.id} updated their full data with screenshot. Telegram File ID: {file_id}")
-                await message.answer("✅ تم تحديث بياناتك ودفعك بنجاح. سيتم التحقق يدوياً. شكراً!")
-            else:
-                await conn.execute('''
-                    INSERT INTO users (telegram_id, email, password, age, experience, capital, payment_image)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ''', message.from_user.id, data.get('email'), data.get('password'), data.get('age'),
-                   data.get('experience'), data.get('capital'), file_id)
-                logger.info(f"User {message.from_user.id} data saved successfully with screenshot. Telegram File ID: {file_id}")
-                await message.answer("✅ تم استلام بياناتك ودفعك بنجاح. سيتم التحقق يدوياً. شكراً!")
-    except Exception as e:
-        logger.error(f"Error saving/updating data for user {message.from_user.id}: {e}", exc_info=True)
-        await message.answer("❌ حدث خطأ أثناء حفظ معلوماتك. الرجاء المحاولة مرة أخرى.")
-    finally:
-        await state.clear() 
-
-@dp.callback_query(F.data == 'copy_address') 
-async def copy_address_callback(callback_query: types.CallbackQuery):
-    """
-    Handles the callback query when the user clicks 'copy_address' button.
-    Sends an alert to the user.
-    """
-    await callback_query.answer(text="📋 تم نسخ العنوان (انسخه يدوياً)", show_alert=True)
-    logger.info(f"User {callback_query.from_user.id} clicked copy address button.")
-
-# --- Generic handlers for unhandled messages ---
-# This handler is placed LAST to catch any message not handled by specific filters above.
-@dp.message()
-async def unhandled_message(message: types.Message):
-    """
-    Handles any message that does not match specific handlers above.
-    Provides a fallback response to the user.
-    """
-    logger.warning(f"Unhandled message from user {message.from_user.id} ({message.from_user.full_name}): Text='{message.text}' Type='{message.content_type}'")
+    await state.update_data(
     
-    if message.text and message.text.startswith('/'):
-        await message.answer("عذراً، هذا الأمر غير معروف. يرجى البدء باستخدام الأمر /start.")
-    elif message.text: # If it's a text message but not a command
-        await message.answer("عذراً، لم أفهم طلبك. يرجى البدء باستخدام الأمر /start.")
-    else: # For other content types (stickers, voice, etc.) not explicitly handled
-        await message.answer("عذراً، لا أستطيع معالجة هذا النوع من الرسائل. يرجى البدء باستخدام الأمر /start.")
-
-
-# --- Startup and Shutdown Hooks ---
-
-async def on_startup_tasks(dispatcher):
-    """
-    Tasks to be executed when the bot starts up.
-    Initializes database connection pool and creates necessary tables.
-    """
-    global db_pool
-    try:
-        db_pool = await create_db_pool()
-        await init_db()
-        logger.info("Bot is ready and running! Waiting for Telegram updates...")
-    except Exception as e:
-        logger.critical(f"Failed to start bot due to critical startup tasks (e.g., DB connection): {e}", exc_info=True)
-        sys.exit(1) 
-
-async def on_shutdown_tasks(dispatcher):
-    """
-    Tasks to be executed when the bot is shutting down.
-    Closes the database connection pool cleanly.
-    """
-    if db_pool:
-        await db_pool.close()
-        logger.info("Database connection pool closed cleanly.")
-    logger.info("Bot has been shut down.")
-
-# --- Main function to run the bot ---
-async def main():
-    """
-    The main asynchronous function that registers startup/shutdown hooks
-    and starts the bot's polling mechanism.
-    """
-    dp.startup.register(on_startup_tasks)
-    dp.shutdown.register(on_shutdown_tasks)
-
-    await dp.start_polling(bot, skip_updates=True)
-
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped manually (KeyboardInterrupt).")
-    except Exception as e:
-        logger.critical(f"An unhandled error occurred during bot execution: {e}", exc_info=True)
-
