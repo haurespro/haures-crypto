@@ -22,11 +22,13 @@ DB_HOST = os.getenv("DB_HOST")
 # Ensure API_TOKEN is set
 if not API_TOKEN:
     logger.error("BOT_TOKEN environment variable is not set. Please set it in Render.")
+    # Exiting the program is crucial if the bot cannot authenticate
     exit("BOT_TOKEN is missing. Exiting.")
 
 # Bot and Dispatcher setup
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher(storage=MemoryStorage()) # Initialized without 'bot' directly in aiogram v3.x
+# Dispatcher is initialized without 'bot' directly in aiogram v3.x
+dp = Dispatcher(storage=MemoryStorage()) 
 
 # Database connection pool
 db_pool = None
@@ -42,14 +44,14 @@ async def create_db_pool():
             password=DB_PASSWORD,
             database=DB_NAME,
             host=DB_HOST,
-            min_size=1,
-            max_size=10
+            min_size=1, # Minimum number of connections in the pool
+            max_size=10 # Maximum number of connections in the pool
         )
         logger.info("Database connection pool created successfully.")
         return pool
     except Exception as e:
         logger.critical(f"Failed to create database pool: {e}")
-        raise
+        raise # Re-raise the exception to stop the application if DB fails
 
 async def init_db():
     """Creates the 'users' table if it does not exist."""
@@ -57,7 +59,7 @@ async def init_db():
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
-                telegram_id BIGINT UNIQUE, -- Added UNIQUE constraint
+                telegram_id BIGINT UNIQUE, -- Added UNIQUE constraint for telegram_id
                 email TEXT,
                 code TEXT,
                 payment_image TEXT
@@ -74,7 +76,7 @@ class UserData(StatesGroup):
 
 # --- Handlers ---
 
-@dp.message(commands=['start'])
+@dp.message(F.command("start")) # Updated: Use F.command for filtering commands
 async def send_welcome(message: types.Message, state: FSMContext):
     """Handles the /start command and initiates the email collection."""
     logger.info(f"User {message.from_user.id} started the bot.")
@@ -84,6 +86,7 @@ async def send_welcome(message: types.Message, state: FSMContext):
 @dp.message(UserData.waiting_email)
 async def process_email(message: types.Message, state: FSMContext):
     """Processes the user's email."""
+    # Basic email validation
     if "@" not in message.text or "." not in message.text:
         await message.answer("❌ يرجى إدخال بريد إلكتروني صالح.")
         return
@@ -99,6 +102,7 @@ async def process_code(message: types.Message, state: FSMContext):
     await state.update_data(code=message.text)
     logger.info(f"User {message.from_user.id} entered code.")
 
+    # Inline keyboard setup for aiogram v3.x
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="📋 نسخ عنوان الدفع", callback_data="copy_address")
     ]])
@@ -110,7 +114,7 @@ async def process_code(message: types.Message, state: FSMContext):
     await message.answer("📷 أرسل لقطة الشاشة كدليل على الدفع:")
     await state.set_state(UserData.waiting_payment)
 
-@dp.message(F.photo, UserData.waiting_payment)
+@dp.message(F.photo, UserData.waiting_payment) # Use F.photo for photo content type filtering
 async def process_payment(message: types.Message, state: FSMContext):
     """Processes the payment screenshot and saves user data."""
     data = await state.get_data()
@@ -118,11 +122,12 @@ async def process_payment(message: types.Message, state: FSMContext):
 
     try:
         async with db_pool.acquire() as conn:
-            # Check if user already exists to prevent duplicate entries on retry
+            # Check if user already exists based on telegram_id
             existing_user = await conn.fetchrow(
                 "SELECT id FROM users WHERE telegram_id = $1", message.from_user.id
             )
             if existing_user:
+                # Update existing user's data
                 await conn.execute('''
                     UPDATE users
                     SET email = $2, code = $3, payment_image = $4
@@ -131,36 +136,44 @@ async def process_payment(message: types.Message, state: FSMContext):
                 logger.info(f"User {message.from_user.id} updated their payment details.")
                 await message.answer("✅ تم تحديث بيانات دفعتك. سيتم التحقق يدوياً. شكراً!")
             else:
+                # Insert new user data
                 await conn.execute('''
                     INSERT INTO users (telegram_id, email, code, payment_image)
                     VALUES ($1, $2, $3, $4)
                 ''', message.from_user.id, data.get('email'), data.get('code'), file_id)
                 logger.info(f"User {message.from_user.id} data saved successfully.")
                 await message.answer("✅ تم استلام دفعتك. سيتم التحقق يدوياً. شكراً!")
-    except asyncpg.exceptions.UniqueViolationError:
-        # This case is now handled by SELECT and UPDATE
-        logger.warning(f"Attempted to insert duplicate user {message.from_user.id}. Data updated instead.")
-        await message.answer("✅ تم تحديث بياناتك. سيتم التحقق يدوياً. شكراً!")
     except Exception as e:
         logger.error(f"Error inserting/updating data for user {message.from_user.id}: {e}", exc_info=True)
         await message.answer("❌ حدث خطأ أثناء حفظ معلوماتك. الرجاء المحاولة مرة أخرى.")
     finally:
         await state.clear() # Clear state after processing
 
-@dp.callback_query(F.data == 'copy_address')
+@dp.callback_query(F.data == 'copy_address') # Use F.data for callback data filtering
 async def copy_address_callback(callback_query: types.CallbackQuery):
     """Handles the callback for copying the payment address."""
+    # Use callback_query.answer for inline keyboard callbacks in aiogram v3.x
     await callback_query.answer(text="📋 تم نسخ العنوان (انسخه يدوياً)", show_alert=True)
     logger.info(f"User {callback_query.from_user.id} clicked copy address.")
 
-# --- Startup and Shutdown ---
+# --- Startup and Shutdown Hooks ---
 
 async def on_startup_tasks(dispatcher):
     """Tasks to run on bot startup."""
     global db_pool
-    db_pool = await create_db_pool()
-    await init_db()
-    logger.info("Bot is ready and running!")
+    try:
+        db_pool = await create_db_pool()
+        await init_db()
+        logger.info("Bot is ready and running!")
+    except Exception as e:
+        logger.critical(f"Failed to start bot due to startup tasks: {e}", exc_info=True)
+        # It's critical to exit if essential services like DB cannot start
+        # Consider re-raising or sys.exit() if running as a service
+        await dispatcher.bot.send_message(
+            chat_id=os.getenv("ADMIN_CHAT_ID"), # Optional: send error to admin if you set ADMIN_CHAT_ID
+            text=f"🔴 Bot startup failed: {e}"
+        )
+        # sys.exit(1) # Uncomment if you want the process to exit immediately on startup failure
 
 async def on_shutdown_tasks(dispatcher):
     """Tasks to run on bot shutdown."""
@@ -172,15 +185,19 @@ async def on_shutdown_tasks(dispatcher):
 # Main function to run the bot
 async def main():
     """Main function to start the bot."""
+    # Register startup and shutdown handlers
     dp.startup.register(on_startup_tasks)
     dp.shutdown.register(on_shutdown_tasks)
+
+    # Start polling, passing the bot instance to it
     await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == '__main__':
     try:
+        # Run the asynchronous main function
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped manually (KeyboardInterrupt).")
     except Exception as e:
-        logger.critical(f"An unhandled error occurred: {e}", exc_info=True)
+        logger.critical(f"An unhandled error occurred during bot execution: {e}", exc_info=True)
         
