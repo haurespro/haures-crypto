@@ -89,8 +89,8 @@ class UserData(StatesGroup):
 # --- Handlers ---
 
 # Handler for the /start command
-# Using F.text == '/start' is a more direct and often more reliable filter than F.command("start")
-@dp.message(F.text == '/start') 
+# This filter is highly robust, catching any text that starts with '/start'
+@dp.message(lambda message: message.text and message.text.startswith('/start')) 
 async def send_welcome(message: types.Message, state: FSMContext):
     """
     Handles the /start command. Responds with a welcome message and prompts for email.
