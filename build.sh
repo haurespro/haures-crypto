@@ -9,7 +9,11 @@ apt-get install -y \
     python3-dev \
     libpq-dev \
     libssl-dev \
-    libffi-dev
+    libffi-dev \
+    pkg-config \
+    zlib1g-dev \
+    libxml2-dev \
+    libxslt1-dev # هذه المكتبات قد لا تكون ضرورية لـ aiohttp مباشرة، لكنها تغطي حالات تجميع أخرى
 
 # ثم قم بتشغيل أمر التثبيت الطبيعي لـ pip
 pip install -r requirements.txt
