@@ -1,142 +1,55 @@
-import logging
-import os
-import asyncio
-import sys
+import logging import re from aiogram import Bot, Dispatcher, executor, types from aiogram.contrib.fsm_storage.memory import MemoryStorage from aiogram.dispatcher import FSMContext from aiogram.dispatcher.filters.state import State, StatesGroup from aiogram.dispatcher.filters import Text import psycopg2 import os from dotenv import load_dotenv
 
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-import asyncpg
+load_dotenv()
 
-# إعداد السجل
+API_TOKEN = os.getenv("BOT_TOKEN") DATABASE_URL = os.getenv("DATABASE_URL")
+
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# --- المتغيرات ---
-API_TOKEN = os.getenv("BOT_TOKEN")
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_NAME = os.getenv("DB_NAME")
-DB_HOST = os.getenv("DB_HOST")
+bot = Bot(token=API_TOKEN) storage = MemoryStorage() dp = Dispatcher(bot, storage=storage)
 
-if not API_TOKEN:
-    logger.critical("BOT_TOKEN غير موجود. تأكد من وضعه في Render.")
-    sys.exit("BOT_TOKEN مفقود. تم إيقاف التشغيل.")
+conn = psycopg2.connect(DATABASE_URL, sslmode='require') cursor = conn.cursor()
 
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+cursor.execute(''' CREATE TABLE IF NOT EXISTS users ( id SERIAL PRIMARY KEY, telegram_id BIGINT, email TEXT, secret TEXT, screenshot_file_id TEXT ) ''') conn.commit()
 
-db_pool = None
+class Form(StatesGroup): email = State() secret = State() age = State() experience = State() capital = State() screenshot = State()
 
-# الاتصال بقاعدة البيانات
-async def create_db_pool():
-    global db_pool
-    if not all([DB_USER, DB_PASSWORD, DB_NAME, DB_HOST]):
-        logger.critical("معلومات الاتصال بقاعدة البيانات ناقصة.")
-        raise ValueError("معلومات DB ناقصة.")
-    db_pool = await asyncpg.create_pool(
-        user=DB_USER,
-        password=DB_PASSWORD,
-        database=DB_NAME,
-        host=DB_HOST
-    )
-    logger.info("✅ تم إنشاء الاتصال بقاعدة البيانات.")
+@dp.message_handler(commands='start') async def cmd_start(message: types.Message): user_fullname = message.from_user.full_name welcome_text = ( f"👋 أهلاً {user_fullname} في بوت Haures!")
 
-async def init_db():
-    async with db_pool.acquire() as conn:
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
-                telegram_id BIGINT UNIQUE,
-                full_name TEXT,
-                email TEXT,
-                code TEXT,
-                payment_image TEXT
-            );
-        ''')
-        logger.info("✅ تم التأكد من وجود جدول users.")
+welcome_text += "\n\n💼 هذا البوت هو أفضل وسيلة للدخول إلى عالم التجارة الإلكترونية بخطوات بسيطة وفعالة!"
+welcome_text += "\n✅ سجّل معلوماتك، ادفع عبر USDT، وابدأ رحلتك معنا."
+welcome_text += "\n\n🔐 لنبدأ، أرسل لي بريدك الإلكتروني:"
 
-# الحالة FSM
-class UserData(StatesGroup):
-    waiting_email = State()
-    waiting_code = State()
-    waiting_payment = State()
+await message.answer(welcome_text)
+await Form.email.set()
 
-# /start
-@dp.message(F.command("start"))
-async def start_handler(message: types.Message, state: FSMContext):
-    user = message.from_user
-    welcome_text = (
-        f"👋 أهلاً {user.full_name}!\n\n"
-        "📦 مرحباً بك في *Haures Bot* — أقوى نظام ذكي للتجارة الإلكترونية باستخدام USDT عبر شبكة TRC20 💰\n\n"
-        "🚀 سيساعدك هذا البوت على إرسال معلوماتك والدفع بكل سهولة وأمان.\n"
-        "🔐 لنبدأ، من فضلك أدخل بريدك الإلكتروني:"
-    )
-    await message.answer(welcome_text, parse_mode="Markdown")
-    await state.set_state(UserData.waiting_email)
+@dp.message_handler(state=Form.email) async def process_email(message: types.Message, state: FSMContext): if not re.match(r"[^@]+@[^@]+.[^@]+", message.text): await message.answer("❌ بريد إلكتروني غير صالح. حاول مرة أخرى.") return await state.update_data(email=message.text) await Form.next() await message.answer("🔑 أدخل رمزك السري (8 أحرف أو أكثر):")
 
-# البريد
-@dp.message(UserData.waiting_email)
-async def email_handler(message: types.Message, state: FSMContext):
-    if "@" not in message.text or "." not in message.text:
-        await message.answer("❌ البريد الإلكتروني غير صالح. حاول مرة أخرى:")
-        return
-    await state.update_data(email=message.text)
-    await message.answer("✅ أدخل الرمز السري (على الأقل 8 أحرف أو أرقام):")
-    await state.set_state(UserData.waiting_code)
+@dp.message_handler(state=Form.secret) async def process_secret(message: types.Message, state: FSMContext): if len(message.text) < 8: await message.answer("❌ الرمز قصير جدًا. أعد إدخال رمز لا يقل عن 8 أحرف أو أرقام.") return await state.update_data(secret=message.text) await Form.next() await message.answer("🎂 كم عمرك؟")
 
-# الكود السري
-@dp.message(UserData.waiting_code)
-async def code_handler(message: types.Message, state: FSMContext):
-    code = message.text.strip()
-    if len(code) < 8:
-        await message.answer("❌ الرمز قصير جداً. يجب أن يكون 8 أحرف أو أرقام على الأقل.")
-        return
-    await state.update_data(code=code)
+@dp.message_handler(state=Form.age) async def process_age(message: types.Message, state: FSMContext): try: age = int(message.text) if age < 18: await message.answer("📚 روح تقرا بابا! الخدمة هذه للكبار فقط.") await state.finish() return await Form.next() await message.answer("📊 هل لديك خبرة في التجارة الإلكترونية؟ (نعم / لا)") except ValueError: await message.answer("❌ أدخل رقمًا صحيحًا من فضلك.")
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 نسخ عنوان الدفع", callback_data="copy_address")]
-    ])
-    await message.answer(
-        "💳 أرسل المبلغ إلى العنوان التالي:\n`TLxUzr....TRC20`",
-        parse_mode="Markdown",
-        reply_markup=keyboard
-    )
-    await message.answer("📷 الآن، أرسل لقطة شاشة لإثبات الدفع:")
-    await state.set_state(UserData.waiting_payment)
+@dp.message_handler(state=Form.experience) async def process_experience(message: types.Message, state: FSMContext): await Form.next() await message.answer("💰 كم هو أقل رأس مال ممكن تبدأ به مشروع؟")
 
-# إثبات الدفع
-@dp.message(F.photo, UserData.waiting_payment)
-async def payment_handler(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    file_id = message.photo[-1].file_id
+@dp.message_handler(state=Form.capital) async def process_capital(message: types.Message, state: FSMContext): await Form.next() await message.answer( "✅ ممتاز!\n💸 قم الآن بالدفع عبر عنوان USDT (TRC20):\n TLcdVqDCowDiyXKJMDZzVduN1HCS7yZozk\n ثم أرسل لقطة شاشة لإثبات الدفع. 📸", parse_mode="Markdown", reply_markup=types.InlineKeyboardMarkup().add( types.InlineKeyboardButton("📋 نسخ العنوان", switch_inline_query_current_chat="TLcdVqDCowDiyXKJMDZzVduN1HCS7yZozk") ) )
 
-    async with db_pool.acquire() as conn:
-        user = await conn.fetchrow("SELECT id FROM users WHERE telegram_id = $1", message.from_user.id)
-        if user:
-            await conn.execute('''
-                UPDATE users
-                SET email = $2, code = $3, payment_image = $4
-                WHERE telegram_id = $1
-            ''', message.from_user.id, data["email"], data["code"], file_id)
-        else:
-            await conn.execute('''
-                INSERT INTO users (telegram_id, full_name, email, code, payment_image)
-                VALUES ($1, $2, $3, $4, $5)
-            ''', message.from_user.id, message.from_user.full_name, data["email"], data["code"], file_id)
-    await message.answer("✅ تم استلام معلوماتك بنجاح! سيتم التحقق من الدفع قريبًا. شكراً لاستخدامك Haures 💼")
-    await state.clear()
+@dp.message_handler(content_types=types.ContentType.PHOTO, state=Form.screenshot) async def process_screenshot(message: types.Message, state: FSMContext): photo = message.photo[-1] file_id = photo.file_id
 
-# بدء البوت
-async def main():
-    await create_db_pool()
-    await init_db()
-    await dp.start_polling(bot)
+user_data = await state.get_data()
+telegram_id = message.from_user.id
+email = user_data['email']
+secret = user_data['secret']
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("تم إيقاف البوت.")
+cursor.execute(
+    "INSERT INTO users (telegram_id, email, secret, screenshot_file_id) VALUES (%s, %s, %s, %s)",
+    (telegram_id, email, secret, file_id)
+)
+conn.commit()
+
+await message.answer("📥 تم استلام لقطة الشاشة! سيتم التحقق يدويًا من الدفع قريبًا.")
+await state.finish()
+
+@dp.message_handler(lambda message: message.text.lower() == 'إلغاء', state='*') async def cancel_handler(message: types.Message, state: FSMContext): await state.finish() await message.answer('❌ تم إلغاء العملية.')
+
+if name == 'main': from aiogram import executor print("✅ البوت قيد التشغيل ...") executor.start_polling(dp, skip_updates=True)
+
