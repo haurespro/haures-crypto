@@ -13,7 +13,8 @@ apt-get install -y \
     pkg-config \
     zlib1g-dev \
     libxml2-dev \
-    libxslt1-dev # هذه المكتبات قد لا تكون ضرورية لـ aiohttp مباشرة، لكنها تغطي حالات تجميع أخرى
+    libxslt1-dev \
+    # يمكنك إضافة المزيد هنا إذا ظهرت أخطاء تجميع أخرى في المستقبل
 
 # ثم قم بتشغيل أمر التثبيت الطبيعي لـ pip
 pip install -r requirements.txt
