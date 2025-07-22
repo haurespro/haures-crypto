@@ -45,10 +45,8 @@ async def create_db_pool():
     Establishes and returns a PostgreSQL database connection pool using asyncpg.
     Ensures all necessary DB environment variables are set.
     """
-    # Changed to logger.error instead of sys.exit to allow bot to potentially start
-    # if DB is not immediately critical for a simple bot, but for your use case,
-    # DB is critical, so we will still exit if variables are missing.
-    if not all([DB_USER, DB_PASSWORD, DB_NAME, DB_HOST]):
+    # *** التعديل هنا: تأكد من إغلاق القوس المربع والقوس الدائري ***
+    if not all([DB_USER, DB_PASSWORD, DB_NAME, DB_HOST]): # هذا السطر تم تصحيحه
         logger.critical("One or more database environment variables (DB_USER, DB_PASSWORD, DB_NAME, DB_HOST) are NOT SET! Please check Render settings.")
         sys.exit("Critical Error: Missing critical database environment variables. Cannot connect to DB. Exiting application.") # Still exit here
 
@@ -198,95 +196,4 @@ async def process_capital(message: types.Message, state: FSMContext):
     capital = message.text
     if not capital.strip():
         await message.reply("❌ الرجاء إدخال رأس المال:")
-        return
-    await state.update_data(capital=capital)
-    logger.info(f"User {message.from_user.id} provided capital.")
-    await message.answer("✅ تم استلام رأس المال.\nالرجاء إرسال صورة إيصال الدفع:")
-    await state.set_state(UserData.waiting_payment)
-
-@dp.message(UserData.waiting_payment, F.photo)
-async def process_payment_photo(message: types.Message, state: FSMContext):
-    photo_id = message.photo[-1].file_id # الحصول على أكبر حجم للصورة
-    await state.update_data(payment_image=photo_id)
-    logger.info(f"User {message.from_user.id} provided payment image: {photo_id}")
-    await message.answer("✅ تم استلام صورة الدفع بنجاح!")
-
-    # هنا يمكنك حفظ جميع البيانات في قاعدة البيانات
-    user_data = await state.get_data()
-    telegram_id = message.from_user.id
-    email = user_data.get('email')
-    password = user_data.get('password')
-    age = user_data.get('age')
-    experience = user_data.get('experience')
-    capital = user_data.get('capital')
-    payment_image = user_data.get('payment_image')
-
-    # Ensure db_pool is available before trying to insert
-    if db_pool is None:
-        logger.error(f"Cannot save user {telegram_id} data: DB pool is not available.")
-        await message.answer("❌ لا يمكن حفظ بياناتك الآن بسبب مشكلة في قاعدة البيانات. الرجاء المحاولة لاحقاً.")
-        await state.clear()
-        return
-
-    try:
-        async with db_pool.acquire() as conn:
-            await conn.execute('''
-                INSERT INTO users (telegram_id, email, password, age, experience, capital, payment_image)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ON CONFLICT (telegram_id) DO UPDATE
-                SET email = EXCLUDED.email,
-                    password = EXCLUDED.password,
-                    age = EXCLUDED.age,
-                    experience = EXCLUDED.experience,
-                    capital = EXCLUDED.capital,
-                    payment_image = EXCLUDED.payment_image;
-            ''', telegram_id, email, password, age, experience, capital, payment_image)
-        logger.info(f"User {telegram_id} data saved/updated successfully in DB.")
-        await message.answer("🎉 تم تسجيل بياناتك بنجاح! شكراً لك.")
-    except Exception as e:
-        logger.error(f"Failed to save user {telegram_id} data to DB: {e}", exc_info=True)
-        await message.answer("❌ حدث خطأ أثناء حفظ بياناتك. الرجاء المحاولة مرة أخرى لاحقاً.")
-
-    await state.clear() # مسح الحالة بعد اكتمال العملية
-
-# --- Main function to run the bot ---
-async def main():
-    global db_pool
-    # Try to create DB pool
-    db_pool = await create_db_pool()
-
-    # If DB pool creation failed, log and exit, as DB is critical for this bot.
-    if db_pool is None:
-        logger.critical("Failed to initialize database pool. Bot cannot start without a database connection.")
-        sys.exit("Critical Error: Database connection failed. Exiting application.")
-
-    # Try to initialize DB tables
-    db_initialized = await init_db()
-    if not db_initialized:
-        logger.critical("Failed to initialize database tables. Bot cannot start.")
-        if db_pool:
-            await db_pool.close() # Close pool here too if initialization fails after creation
-        sys.exit("Critical Error: Database table initialization failed. Exiting application.")
-
-    logger.info("Starting bot polling...")
-    try:
-        await dp.start_polling(bot) # Start listening for updates from Telegram
-    except Exception as e:
-        logger.critical(f"Bot polling stopped due to an unhandled error: {e}", exc_info=True)
-    finally:
-        # Close the DB pool within the same event loop context
-        if db_pool:
-            logger.info("Closing database connection pool.")
-            await db_pool.close() # Direct await call, NOT asyncio.run()
-        logger.info("Bot polling stopped.")
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by KeyboardInterrupt.")
-    except Exception as e:
-        logger.critical(f"An unhandled error occurred in main execution: {e}", exc_info=True)
-    # The 'finally' block that caused the error has been removed from here
-    
+        
