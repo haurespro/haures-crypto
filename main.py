@@ -1,3 +1,20 @@
+from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import os
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+    username = Column(String, unique=True)
+    email = Column(String)
+
+engine = create_engine(DATABASE_URL)
+Base.metadata.create_all(engine)
 import logging
 from aiogram import Bot, Dispatcher, executor, types
 import os
