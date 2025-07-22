@@ -51,14 +51,14 @@ async def create_db_pool():
             password=DB_PASSWORD,
             database=DB_NAME,
             host=DB_HOST,
-            min_size=1, # Minimum number of connections in the pool
-            max_size=10 # Maximum number of connections in the pool
+            min_size=1, 
+            max_size=10
         )
         logger.info("Database connection pool created successfully.")
         return pool
     except Exception as e:
         logger.critical(f"Failed to create database pool: {e}", exc_info=True)
-        raise # Re-raise to ensure startup fails if DB connection cannot be established
+        raise 
 
 async def init_db():
     """
@@ -69,7 +69,7 @@ async def init_db():
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
-                telegram_id BIGINT UNIQUE, -- Ensures each Telegram user ID is unique
+                telegram_id BIGINT UNIQUE, 
                 email TEXT,
                 code TEXT,
                 payment_image TEXT
@@ -88,9 +88,8 @@ class UserData(StatesGroup):
 
 # --- Handlers ---
 
-# Handler for the /start command
-# This filter is highly robust, catching any text that starts with '/start'
-@dp.message(lambda message: message.text and message.text.startswith('/start')) 
+# IMPORTANT: This /start handler is placed first and uses F.command("start") for explicit priority.
+@dp.message(F.command("start")) 
 async def send_welcome(message: types.Message, state: FSMContext):
     """
     Handles the /start command. Responds with a welcome message and prompts for email.
@@ -125,19 +124,18 @@ async def process_code(message: types.Message, state: FSMContext):
     Provides payment address and prompts for payment screenshot.
     Sets the state to waiting_payment.
     """
-    if not message.text: # Basic check for empty message
+    if not message.text: 
         await message.answer("❌ يرجى إدخال رمز صالح.")
         return
 
     await state.update_data(code=message.text)
     logger.info(f"User {message.from_user.id} entered code. Prompting for payment.")
 
-    # Inline keyboard for copying address (aiogram v3.x syntax)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="📋 نسخ عنوان الدفع", callback_data="copy_address")
     ]])
     await message.answer(
-        "💳 أرسل المبلغ إلى هذا العنوان:\n`TLxUzr...TRC20`", # Consider making this address configurable
+        "💳 أرسل المبلغ إلى هذا العنوان:\n`TLxUzr...TRC20`", 
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -153,16 +151,14 @@ async def process_payment(message: types.Message, state: FSMContext):
     Clears the FSM state upon completion.
     """
     data = await state.get_data()
-    file_id = message.photo[-1].file_id # Get the file_id of the largest photo for storage
+    file_id = message.photo[-1].file_id 
 
     try:
         async with db_pool.acquire() as conn:
-            # Check if user already exists based on telegram_id to prevent duplicates or update
             existing_user = await conn.fetchrow(
                 "SELECT id FROM users WHERE telegram_id = $1", message.from_user.id
             )
             if existing_user:
-                # Update existing user's data
                 await conn.execute('''
                     UPDATE users
                     SET email = $2, code = $3, payment_image = $4
@@ -171,96 +167,10 @@ async def process_payment(message: types.Message, state: FSMContext):
                 logger.info(f"User {message.from_user.id} updated their payment details. Telegram File ID: {file_id}")
                 await message.answer("✅ تم تحديث بيانات دفعتك. سيتم التحقق يدوياً. شكراً!")
             else:
-                # Insert new user data
                 await conn.execute('''
                     INSERT INTO users (telegram_id, email, code, payment_image)
                     VALUES ($1, $2, $3, $4)
                 ''', message.from_user.id, data.get('email'), data.get('code'), file_id)
                 logger.info(f"User {message.from_user.id} data saved successfully. Telegram File ID: {file_id}")
-                await message.answer("✅ تم استلام دفعتك. سيتم التحقق يدوياً. شكراً!")
-    except Exception as e:
-        logger.error(f"Error saving/updating data for user {message.from_user.id}: {e}", exc_info=True)
-        await message.answer("❌ حدث خطأ أثناء حفظ معلوماتك. الرجاء المحاولة مرة أخرى.")
-    finally:
-        await state.clear() # Always clear state after a successful (or failed but final) transaction
-
-# Handler for the inline button callback
-@dp.callback_query(F.data == 'copy_address') 
-async def copy_address_callback(callback_query: types.CallbackQuery):
-    """
-    Handles the callback query when the user clicks 'copy_address' button.
-    Sends an alert to the user.
-    """
-    await callback_query.answer(text="📋 تم نسخ العنوان (انسخه يدوياً)", show_alert=True)
-    logger.info(f"User {callback_query.from_user.id} clicked copy address button.")
-
-# --- Generic handlers for unhandled messages ---
-# This handler should be placed AFTER all specific handlers
-# It catches any message that wasn't handled by previous filters.
-@dp.message()
-async def unhandled_message(message: types.Message):
-    """
-    Handles any message that does not match specific handlers above.
-    Provides a fallback response to the user.
-    """
-    logger.warning(f"Unhandled message from user {message.from_user.id} ({message.from_user.full_name}): Text='{message.text}' Type='{message.content_type}'")
-    # Only reply if it's a text message and not potentially a command that failed to parse
-    if message.text and not message.text.startswith('/'): 
-        await message.answer("عذراً، لم أفهم طلبك. يرجى البدء باستخدام الأمر /start.")
-    elif message.text and message.text.startswith('/'): # If it's a command, but not handled
-         await message.answer("عذراً، هذا الأمر غير معروف. يرجى البدء باستخدام الأمر /start.")
-    else: # For other content types (stickers, voice, etc.) that are not explicitly handled
-        await message.answer("عذراً، لا أستطيع معالجة هذا النوع من الرسائل. يرجى البدء باستخدام الأمر /start.")
-
-
-# --- Startup and Shutdown Hooks ---
-
-async def on_startup_tasks(dispatcher):
-    """
-    Tasks to be executed when the bot starts up.
-    Initializes database connection pool and creates necessary tables.
-    """
-    global db_pool
-    try:
-        db_pool = await create_db_pool()
-        await init_db()
-        logger.info("Bot is ready and running! Waiting for Telegram updates...")
-    except Exception as e:
-        logger.critical(f"Failed to start bot due to critical startup tasks (e.g., DB connection): {e}", exc_info=True)
-        # It's crucial to exit the process if essential services like DB cannot start,
-        # otherwise the bot will be in a non-functional state.
-        sys.exit(1) # Force the process to exit with an error code
-
-async def on_shutdown_tasks(dispatcher):
-    """
-    Tasks to be executed when the bot is shutting down.
-    Closes the database connection pool cleanly.
-    """
-    if db_pool:
-        await db_pool.close()
-        logger.info("Database connection pool closed cleanly.")
-    logger.info("Bot has been shut down.")
-
-# --- Main function to run the bot ---
-async def main():
-    """
-    The main asynchronous function that registers startup/shutdown hooks
-    and starts the bot's polling mechanism.
-    """
-    # Register startup and shutdown handlers with the Dispatcher
-    dp.startup.register(on_startup_tasks)
-    dp.shutdown.register(on_shutdown_tasks)
-
-    # Start polling for updates from Telegram.
-    # skip_updates=True ensures the bot doesn't process old updates from before it started.
-    await dp.start_polling(bot, skip_updates=True)
-
-if __name__ == '__main__':
-    try:
-        # Run the main asynchronous function
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped manually (KeyboardInterrupt).")
-    except Exception as e:
-        logger.critical(f"An unhandled error occurred during bot execution: {e}", exc_info=True)
-
+                await message.answer("✅ تم استلام دف
+                
