@@ -1,55 +1,311 @@
-import logging import re from aiogram import Bot, Dispatcher, executor, types from aiogram.contrib.fsm_storage.memory import MemoryStorage from aiogram.dispatcher import FSMContext from aiogram.dispatcher.filters.state import State, StatesGroup from aiogram.dispatcher.filters import Text import psycopg2 import os from dotenv import load_dotenv
+import logging
+import os
+import asyncio
+import sys # Import sys for sys.exit
+import re # Added for email validation
 
-load_dotenv()
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+import asyncpg
 
-API_TOKEN = os.getenv("BOT_TOKEN") DATABASE_URL = os.getenv("DATABASE_URL")
+# Configure logging to provide detailed information
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-logging.basicConfig(level=logging.INFO)
+# --- Environment Variables ---
+# Fetch sensitive information from environment variables for security
+API_TOKEN = os.getenv("BOT_TOKEN")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_NAME = os.getenv("DB_NAME")
+DB_HOST = os.getenv("DB_HOST")
 
-bot = Bot(token=API_TOKEN) storage = MemoryStorage() dp = Dispatcher(bot, storage=storage)
+# Crucial check: Exit if BOT_TOKEN is not set, as the bot cannot function without it.
+if not API_TOKEN:
+    logger.critical("BOT_TOKEN environment variable is NOT SET. Please set it in Render.")
+    sys.exit("Critical Error: BOT_TOKEN is missing. Exiting application.")
 
-conn = psycopg2.connect(DATABASE_URL, sslmode='require') cursor = conn.cursor()
+# --- Bot and Dispatcher Setup ---
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(storage=MemoryStorage()) 
 
-cursor.execute(''' CREATE TABLE IF NOT EXISTS users ( id SERIAL PRIMARY KEY, telegram_id BIGINT, email TEXT, secret TEXT, screenshot_file_id TEXT ) ''') conn.commit()
+# Global variable for database connection pool
+db_pool = None
 
-class Form(StatesGroup): email = State() secret = State() age = State() experience = State() capital = State() screenshot = State()
+async def create_db_pool():
+    """
+    Establishes and returns a PostgreSQL database connection pool using asyncpg.
+    Ensures all necessary DB environment variables are set.
+    """
+    if not all([DB_USER, DB_PASSWORD, DB_NAME, DB_HOST]):
+        logger.critical("One or more database environment variables (DB_USER, DB_PASSWORD, DB_NAME, DB_HOST) are NOT SET! Please check Render settings.")
+        raise ValueError("Missing critical database environment variables. Cannot connect to DB.")
+    try:
+        pool = await asyncpg.create_pool(
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME,
+            host=DB_HOST,
+            min_size=1, 
+            max_size=10
+        )
+        logger.info("Database connection pool created successfully.")
+        return pool
+    except Exception as e:
+        logger.critical(f"Failed to create database pool: {e}", exc_info=True)
+        raise 
 
-@dp.message_handler(commands='start') async def cmd_start(message: types.Message): user_fullname = message.from_user.full_name welcome_text = ( f"👋 أهلاً {user_fullname} في بوت Haures!")
+async def init_db():
+    """
+    Creates the 'users' table if it does not already exist.
+    Ensures a unique constraint on 'telegram_id'.
+    Updated to include new fields: password, age, experience, capital.
+    """
+    async with db_pool.acquire() as conn:
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                telegram_id BIGINT UNIQUE, 
+                email TEXT,
+                password TEXT, -- Added for password
+                age INT,        -- Added for age
+                experience TEXT,-- Added for experience
+                capital TEXT,   -- Added for capital
+                payment_image TEXT
+            );
+        ''')
+    logger.info("Database table 'users' checked/created successfully.")
 
-welcome_text += "\n\n💼 هذا البوت هو أفضل وسيلة للدخول إلى عالم التجارة الإلكترونية بخطوات بسيطة وفعالة!"
-welcome_text += "\n✅ سجّل معلوماتك، ادفع عبر USDT، وابدأ رحلتك معنا."
-welcome_text += "\n\n🔐 لنبدأ، أرسل لي بريدك الإلكتروني:"
+# --- FSM States ---
+class UserData(StatesGroup):
+    """
+    States for the Finite State Machine (FSM) to manage user input flow.
+    Updated to include new states.
+    """
+    waiting_email = State()
+    waiting_password = State() # New state
+    waiting_age = State()      # New state
+    waiting_experience = State() # New state
+    waiting_capital = State()    # New state
+    waiting_payment = State()
 
-await message.answer(welcome_text)
-await Form.email.set()
+# --- Handlers ---
 
-@dp.message_handler(state=Form.email) async def process_email(message: types.Message, state: FSMContext): if not re.match(r"[^@]+@[^@]+.[^@]+", message.text): await message.answer("❌ بريد إلكتروني غير صالح. حاول مرة أخرى.") return await state.update_data(email=message.text) await Form.next() await message.answer("🔑 أدخل رمزك السري (8 أحرف أو أكثر):")
+@dp.message(F.command("start")) 
+async def send_welcome(message: types.Message, state: FSMContext):
+    """
+    Handles the /start command. Responds with a welcome message including
+    user info and prompts for email.
+    """
+    await state.clear() # Clear any previous state for a fresh start
+    user_id = message.from_user.id
+    username = message.from_user.username if message.from_user.username else "لا يوجد اسم مستخدم"
+    full_name = message.from_user.full_name
 
-@dp.message_handler(state=Form.secret) async def process_secret(message: types.Message, state: FSMContext): if len(message.text) < 8: await message.answer("❌ الرمز قصير جدًا. أعد إدخال رمز لا يقل عن 8 أحرف أو أرقام.") return await state.update_data(secret=message.text) await Form.next() await message.answer("🎂 كم عمرك؟")
+    logger.info(f"User {user_id} ({full_name} @{username}) sent /start. Initiating flow.")
+    
+    welcome_message = (
+        f"👋 مرحباً بك يا {full_name} (@{username})!\n"
+        f"أنا بوت Haures، دليلك لأفضل برنامج في التجارة الإلكترونية.\n"
+        "📩 الرجاء أدخل بريدك الإلكتروني لتبدأ رحلتك معنا:"
+    )
+    await message.answer(welcome_message)
+    await state.set_state(UserData.waiting_email)
 
-@dp.message_handler(state=Form.age) async def process_age(message: types.Message, state: FSMContext): try: age = int(message.text) if age < 18: await message.answer("📚 روح تقرا بابا! الخدمة هذه للكبار فقط.") await state.finish() return await Form.next() await message.answer("📊 هل لديك خبرة في التجارة الإلكترونية؟ (نعم / لا)") except ValueError: await message.answer("❌ أدخل رقمًا صحيحًا من فضلك.")
+@dp.message(UserData.waiting_email)
+async def process_email(message: types.Message, state: FSMContext):
+    """
+    Processes the user's email input. Performs basic validation.
+    Prompts for secret code and sets the state to waiting_password.
+    """
+    email = message.text
+    if not re.match(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        logger.warning(f"User {message.from_user.id} entered invalid email: {email}")
+        await message.answer("❌ البريد الإلكتروني غير صالح. حاول مرة أخرى:")
+        return
 
-@dp.message_handler(state=Form.experience) async def process_experience(message: types.Message, state: FSMContext): await Form.next() await message.answer("💰 كم هو أقل رأس مال ممكن تبدأ به مشروع؟")
+    await state.update_data(email=email)
+    logger.info(f"User {message.from_user.id} entered email: {email}. Prompting for password.")
+    await message.answer("🔑 الرجاء إدخال الرمز السري (8 أحرف أو أكثر):")
+    await state.set_state(UserData.waiting_password) # Advance to waiting_password
 
-@dp.message_handler(state=Form.capital) async def process_capital(message: types.Message, state: FSMContext): await Form.next() await message.answer( "✅ ممتاز!\n💸 قم الآن بالدفع عبر عنوان USDT (TRC20):\n TLcdVqDCowDiyXKJMDZzVduN1HCS7yZozk\n ثم أرسل لقطة شاشة لإثبات الدفع. 📸", parse_mode="Markdown", reply_markup=types.InlineKeyboardMarkup().add( types.InlineKeyboardButton("📋 نسخ العنوان", switch_inline_query_current_chat="TLcdVqDCowDiyXKJMDZzVduN1HCS7yZozk") ) )
+@dp.message(UserData.waiting_password)
+async def process_password(message: types.Message, state: FSMContext):
+    """
+    Processes the user's secret code input. Validates password length.
+    Prompts for age and sets the state to waiting_age.
+    """
+    password = message.text
+    if len(password) < 8:
+        logger.warning(f"User {message.from_user.id} entered short password.")
+        await message.answer("❌ الرمز السري قصير جدًا. يجب أن يكون 8 أحرف أو أكثر:")
+        return
 
-@dp.message_handler(content_types=types.ContentType.PHOTO, state=Form.screenshot) async def process_screenshot(message: types.Message, state: FSMContext): photo = message.photo[-1] file_id = photo.file_id
+    await state.update_data(password=password)
+    logger.info(f"User {message.from_user.id} entered password. Prompting for age.")
+    await message.answer("📊 كم عمرك؟")
+    await state.set_state(UserData.waiting_age) # Advance to waiting_age
 
-user_data = await state.get_data()
-telegram_id = message.from_user.id
-email = user_data['email']
-secret = user_data['secret']
+@dp.message(UserData.waiting_age)
+async def process_age(message: types.Message, state: FSMContext):
+    """
+    Processes the user's age input. Validates age and prompts for experience or ends flow.
+    """
+    try:
+        age = int(message.text)
+        if age < 18:
+            logger.warning(f"User {message.from_user.id} entered age below 18: {age}. Ending flow.")
+            await message.answer("⚠️ عذرًا، يجب أن يكون عمرك 18 سنة أو أكثر للمشاركة.\nروح تقرا بابا 📚!")
+            await state.clear() # Clear state and end conversation
+            return
+        
+        await state.update_data(age=age)
+        logger.info(f"User {message.from_user.id} entered age: {age}. Prompting for experience.")
+        await message.answer("🧠 هل كانت لديك خبرة في مجال التجارة الإلكترونية؟ (نعم/لا)")
+        await state.set_state(UserData.waiting_experience) # Advance to waiting_experience
+    except ValueError:
+        logger.warning(f"User {message.from_user.id} entered non-numeric age: {message.text}")
+        await message.answer("❌ الرجاء إدخال عمر صحيح (رقم فقط):")
 
-cursor.execute(
-    "INSERT INTO users (telegram_id, email, secret, screenshot_file_id) VALUES (%s, %s, %s, %s)",
-    (telegram_id, email, secret, file_id)
-)
-conn.commit()
+@dp.message(UserData.waiting_experience)
+async def process_experience(message: types.Message, state: FSMContext):
+    """
+    Processes user's experience input. Prompts for capital.
+    """
+    await state.update_data(experience=message.text)
+    logger.info(f"User {message.from_user.id} entered experience: {message.text}. Prompting for capital.")
+    await message.answer("💰 هل لديك رأس مال صغير لكي تبدأ التجارة الإلكترونية؟ (نعم/لا)")
+    await state.set_state(UserData.waiting_capital) # Advance to waiting_capital
 
-await message.answer("📥 تم استلام لقطة الشاشة! سيتم التحقق يدويًا من الدفع قريبًا.")
-await state.finish()
+@dp.message(UserData.waiting_capital)
+async def process_capital(message: types.Message, state: FSMContext):
+    """
+    Processes user's capital input. Provides payment address and prompts for screenshot.
+    """
+    await state.update_data(capital=message.text)
+    logger.info(f"User {message.from_user.id} entered capital: {message.text}. Prompting for payment screenshot.")
 
-@dp.message_handler(lambda message: message.text.lower() == 'إلغاء', state='*') async def cancel_handler(message: types.Message, state: FSMContext): await state.finish() await message.answer('❌ تم إلغاء العملية.')
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📋 نسخ عنوان الدفع", callback_data="copy_address")
+    ]])
+    await message.answer(
+        "💳 أرسل المبلغ إلى هذا العنوان:\n`TLxUzr...TRC20`", 
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+    await message.answer("📷 أرسل لقطة الشاشة كدليل على الدفع:")
+    await state.set_state(UserData.waiting_payment) 
 
-if name == 'main': from aiogram import executor print("✅ البوت قيد التشغيل ...") executor.start_polling(dp, skip_updates=True)
+@dp.message(F.photo, UserData.waiting_payment) 
+async def process_payment(message: types.Message, state: FSMContext):
+    """
+    Processes the payment screenshot provided by the user.
+    Saves or updates user data (Telegram ID, email, password, age, experience, capital, payment image file ID)
+    in the database. Clears the FSM state upon completion.
+    """
+    data = await state.get_data()
+    file_id = message.photo[-1].file_id 
+
+    try:
+        async with db_pool.acquire() as conn:
+            existing_user = await conn.fetchrow(
+                "SELECT id FROM users WHERE telegram_id = $1", message.from_user.id
+            )
+            if existing_user:
+                await conn.execute('''
+                    UPDATE users
+                    SET email = $2, password = $3, age = $4, experience = $5, capital = $6, payment_image = $7
+                    WHERE telegram_id = $1
+                ''', message.from_user.id, data.get('email'), data.get('password'), data.get('age'),
+                   data.get('experience'), data.get('capital'), file_id)
+                logger.info(f"User {message.from_user.id} updated their full data with screenshot. Telegram File ID: {file_id}")
+                await message.answer("✅ تم تحديث بياناتك ودفعك بنجاح. سيتم التحقق يدوياً. شكراً!")
+            else:
+                await conn.execute('''
+                    INSERT INTO users (telegram_id, email, password, age, experience, capital, payment_image)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ''', message.from_user.id, data.get('email'), data.get('password'), data.get('age'),
+                   data.get('experience'), data.get('capital'), file_id)
+                logger.info(f"User {message.from_user.id} data saved successfully with screenshot. Telegram File ID: {file_id}")
+                await message.answer("✅ تم استلام بياناتك ودفعك بنجاح. سيتم التحقق يدوياً. شكراً!")
+    except Exception as e:
+        logger.error(f"Error saving/updating data for user {message.from_user.id}: {e}", exc_info=True)
+        await message.answer("❌ حدث خطأ أثناء حفظ معلوماتك. الرجاء المحاولة مرة أخرى.")
+    finally:
+        await state.clear() 
+
+@dp.callback_query(F.data == 'copy_address') 
+async def copy_address_callback(callback_query: types.CallbackQuery):
+    """
+    Handles the callback query when the user clicks 'copy_address' button.
+    Sends an alert to the user.
+    """
+    await callback_query.answer(text="📋 تم نسخ العنوان (انسخه يدوياً)", show_alert=True)
+    logger.info(f"User {callback_query.from_user.id} clicked copy address button.")
+
+# --- Generic handlers for unhandled messages ---
+# This handler is placed LAST to catch any message not handled by specific filters above.
+@dp.message()
+async def unhandled_message(message: types.Message):
+    """
+    Handles any message that does not match specific handlers above.
+    Provides a fallback response to the user.
+    """
+    logger.warning(f"Unhandled message from user {message.from_user.id} ({message.from_user.full_name}): Text='{message.text}' Type='{message.content_type}'")
+    
+    if message.text and message.text.startswith('/'):
+        await message.answer("عذراً، هذا الأمر غير معروف. يرجى البدء باستخدام الأمر /start.")
+    elif message.text: # If it's a text message but not a command
+        await message.answer("عذراً، لم أفهم طلبك. يرجى البدء باستخدام الأمر /start.")
+    else: # For other content types (stickers, voice, etc.) not explicitly handled
+        await message.answer("عذراً، لا أستطيع معالجة هذا النوع من الرسائل. يرجى البدء باستخدام الأمر /start.")
+
+
+# --- Startup and Shutdown Hooks ---
+
+async def on_startup_tasks(dispatcher):
+    """
+    Tasks to be executed when the bot starts up.
+    Initializes database connection pool and creates necessary tables.
+    """
+    global db_pool
+    try:
+        db_pool = await create_db_pool()
+        await init_db()
+        logger.info("Bot is ready and running! Waiting for Telegram updates...")
+    except Exception as e:
+        logger.critical(f"Failed to start bot due to critical startup tasks (e.g., DB connection): {e}", exc_info=True)
+        sys.exit(1) 
+
+async def on_shutdown_tasks(dispatcher):
+    """
+    Tasks to be executed when the bot is shutting down.
+    Closes the database connection pool cleanly.
+    """
+    if db_pool:
+        await db_pool.close()
+        logger.info("Database connection pool closed cleanly.")
+    logger.info("Bot has been shut down.")
+
+# --- Main function to run the bot ---
+async def main():
+    """
+    The main asynchronous function that registers startup/shutdown hooks
+    and starts the bot's polling mechanism.
+    """
+    dp.startup.register(on_startup_tasks)
+    dp.shutdown.register(on_shutdown_tasks)
+
+    await dp.start_polling(bot, skip_updates=True)
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped manually (KeyboardInterrupt).")
+    except Exception as e:
+        logger.critical(f"An unhandled error occurred during bot execution: {e}", exc_info=True)
 
