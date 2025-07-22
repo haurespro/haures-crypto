@@ -42,7 +42,6 @@ async def create_db_pool():
     """
     if not all([DB_USER, DB_PASSWORD, DB_NAME, DB_HOST]):
         logger.critical("One or more database environment variables (DB_USER, DB_PASSWORD, DB_NAME, DB_HOST) are NOT SET! Please check Render settings.")
-        # Instead of raising ValueError, raise a more specific error or sys.exit
         sys.exit("Critical Error: Missing critical database environment variables. Cannot connect to DB. Exiting application.")
     try:
         pool = await asyncpg.create_pool(
@@ -57,7 +56,6 @@ async def create_db_pool():
         return pool
     except Exception as e:
         logger.critical(f"Failed to create database pool: {e}", exc_info=True)
-        # It's better to exit here if DB connection is critical for bot function
         sys.exit(f"Critical Error: Failed to create database pool: {e}") 
 
 async def init_db():
@@ -83,7 +81,6 @@ async def init_db():
         logger.info("Database table 'users' checked/created successfully.")
     except Exception as e:
         logger.critical(f"Failed to initialize database table 'users': {e}", exc_info=True)
-        # Exit if table creation fails, as bot won't function
         sys.exit(f"Critical Error: Failed to initialize database table: {e}")
 
 # --- FSM States ---
@@ -93,10 +90,10 @@ class UserData(StatesGroup):
     Updated to include new states.
     """
     waiting_email = State()
-    waiting_password = State() # New state
-    waiting_age = State()      # New state
-    waiting_experience = State() # New state
-    waiting_capital = State()    # New state
+    waiting_password = State() 
+    waiting_age = State()      
+    waiting_experience = State() 
+    waiting_capital = State()    
     waiting_payment = State()
 
 # --- Handlers ---
@@ -122,91 +119,5 @@ async def send_welcome(message: types.Message, state: FSMContext):
     await message.answer(welcome_message)
     await state.set_state(UserData.waiting_email)
 
-@dp.message(UserData.waiting_email)
-async def process_email(message: types.Message, state: FSMContext):
-    """
-    Processes the user's email input. Performs basic validation.
-    Prompts for secret code and sets the state to waiting_password.
-    """
-    email = message.text
-    if not email or not re.match(r"[^@\s]+@[^@\s]+\.[^@\s]+", email): # Added check for empty message
-        logger.warning(f"User {message.from_user.id} entered invalid email: {email}")
-        await message.answer("❌ البريد الإلكتروني غير صالح. حاول مرة أخرى:")
-        return
-
-    await state.update_data(email=email)
-    logger.info(f"User {message.from_user.id} entered email: {email}. Prompting for password.")
-    await message.answer("🔑 الرجاء إدخال الرمز السري (8 أحرف أو أكثر):")
-    await state.set_state(UserData.waiting_password) # Advance to waiting_password
-
-@dp.message(UserData.waiting_password)
-async def process_password(message: types.Message, state: FSMContext):
-    """
-    Processes the user's secret code input. Validates password length.
-    Prompts for age and sets the state to waiting_age.
-    """
-    password = message.text
-    if not password or len(password) < 8: # Added check for empty message
-        logger.warning(f"User {message.from_user.id} entered short or empty password.")
-        await message.answer("❌ الرمز السري قصير جدًا. يجب أن يكون 8 أحرف أو أكثر:")
-        return
-
-    await state.update_data(password=password)
-    logger.info(f"User {message.from_user.id} entered password. Prompting for age.")
-    await message.answer("📊 كم عمرك؟")
-    await state.set_state(UserData.waiting_age) # Advance to waiting_age
-
-@dp.message(UserData.waiting_age)
-async def process_age(message: types.Message, state: FSMContext):
-    """
-    Processes the user's age input. Validates age and prompts for experience or ends flow.
-    """
-    try:
-        age_text = message.text
-        if not age_text: # Check if message is empty
-            logger.warning(f"User {message.from_user.id} sent empty message for age.")
-            await message.answer("❌ الرجاء إدخال عمر صحيح (رقم فقط):")
-            return
-
-        age = int(age_text)
-        if age < 18:
-            logger.warning(f"User {message.from_user.id} entered age below 18: {age}. Ending flow.")
-            await message.answer("⚠️ عذرًا، يجب أن يكون عمرك 18 سنة أو أكثر للمشاركة.\nروح تقرا بابا 📚!")
-            await state.clear() # Clear state and end conversation
-            return
-        
-        await state.update_data(age=age)
-        logger.info(f"User {message.from_user.id} entered age: {age}. Prompting for experience.")
-        await message.answer("🧠 هل كانت لديك خبرة في مجال التجارة الإلكترونية؟ (نعم/لا)")
-        await state.set_state(UserData.waiting_experience) # Advance to waiting_experience
-    except ValueError:
-        logger.warning(f"User {message.from_user.id} entered non-numeric age: {message.text}")
-        await message.answer("❌ الرجاء إدخال عمر صحيح (رقم فقط):")
-
-@dp.message(UserData.waiting_experience)
-async def process_experience(message: types.Message, state: FSMContext):
-    """
-    Processes user's experience input. Prompts for capital.
-    """
-    if not message.text: # Ensure there's text input
-        logger.warning(f"User {message.from_user.id} sent empty message for experience.")
-        await message.answer("❌ الرجاء الإجابة بنعم أو لا.")
-        return
-
-    await state.update_data(experience=message.text)
-    logger.info(f"User {message.from_user.id} entered experience: {message.text}. Prompting for capital.")
-    await message.answer("💰 هل لديك رأس مال صغير لكي تبدأ التجارة الإلكترونية؟ (نعم/لا)")
-    await state.set_state(UserData.waiting_capital) # Advance to waiting_capital
-
-@dp.message(UserData.waiting_capital)
-async def process_capital(message: types.Message, state: FSMContext):
-    """
-    Processes user's capital input. Provides payment address and prompts for screenshot.
-    """
-    if not message.text: # Ensure there's text input
-        logger.warning(f"User {message.from_user.id} sent empty message for capital.")
-        await message.answer("❌ الرجاء الإجابة بنعم أو لا.")
-        return
-
-    await state.update_data(
-    
+@dp.message(UserData
+            
