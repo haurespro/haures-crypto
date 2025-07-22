@@ -1,9 +1,4 @@
 aiogram==2.25.2
-<<<<<<< HEAD
-aiohttp==3.8.1
-async-timeout==4.0.2
-=======
 aiohttp==3.7.4.post0
 async-timeout==3.0.1
->>>>>>> e993669 (✅ Fix aiohttp build error for Render)
 psycopg2-binary==2.9.9
