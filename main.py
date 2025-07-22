@@ -1,124 +1,186 @@
 import logging
 import os
-import asyncio # إضافة مكتبة asyncio
-from aiogram import Bot, Dispatcher, types, F # إضافة F
+import asyncio
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-# تم إزالة: from aiogram.utils import executor
-from aiogram.fsm.storage.memory import MemoryStorage # تغيير المسار لتخزين FSM
-from aiogram.fsm.context import FSMContext # تغيير المسار لـ FSMContext
-from aiogram.fsm.state import State, StatesGroup # تغيير المسار لـ State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 import asyncpg
 
-# إعداد التسجيل (Logging)
-logging.basicConfig(level=logging.INFO)
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# متغيرات البيئة (سيتم جلبها من إعدادات Render)
+# Environment Variables (fetched from Render settings)
 API_TOKEN = os.getenv("BOT_TOKEN")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_NAME = os.getenv("DB_NAME")
 DB_HOST = os.getenv("DB_HOST")
 
-# إعداد البوت والديسباتشر
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot, storage=MemoryStorage()) # تحديد التخزين هنا
+# Ensure API_TOKEN is set
+if not API_TOKEN:
+    logger.error("BOT_TOKEN environment variable is not set. Please set it in Render.")
+    exit("BOT_TOKEN is missing. Exiting.")
 
-# تهيئة تجمع الاتصال بقاعدة البيانات
+# Bot and Dispatcher setup
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(storage=MemoryStorage()) # Initialized without 'bot' directly in aiogram v3.x
+
+# Database connection pool
 db_pool = None
 
 async def create_db_pool():
-    # التحقق من أن جميع متغيرات قاعدة البيانات موجودة
+    """Initializes the database connection pool."""
     if not all([DB_USER, DB_PASSWORD, DB_NAME, DB_HOST]):
-        logging.error("Database environment variables are not fully set! Please check Render settings.")
+        logger.error("One or more database environment variables are not set! Please check Render settings.")
         raise ValueError("Missing database environment variables.")
-    return await asyncpg.create_pool(
-        user=DB_USER,
-        password=DB_PASSWORD,
-        database=DB_NAME,
-        host=DB_HOST
-    )
+    try:
+        pool = await asyncpg.create_pool(
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME,
+            host=DB_HOST,
+            min_size=1,
+            max_size=10
+        )
+        logger.info("Database connection pool created successfully.")
+        return pool
+    except Exception as e:
+        logger.critical(f"Failed to create database pool: {e}")
+        raise
 
-# إنشاء الجدول إذا لم يكن موجوداً
 async def init_db():
+    """Creates the 'users' table if it does not exist."""
     async with db_pool.acquire() as conn:
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
-                telegram_id BIGINT,
+                telegram_id BIGINT UNIQUE, -- Added UNIQUE constraint
                 email TEXT,
                 code TEXT,
                 payment_image TEXT
             );
         ''')
-    logging.info("Database table 'users' checked/created successfully.")
+    logger.info("Database table 'users' checked/created successfully.")
 
-
-# FSM - تعريف الحالات (States)
+# FSM States
 class UserData(StatesGroup):
+    """States for user data collection."""
     waiting_email = State()
     waiting_code = State()
     waiting_payment = State()
 
-# بداية المحادثة
-@dp.message(commands=['start']) # تغيير: استخدام @dp.message بدلاً من @dp.message_handler
-async def send_welcome(message: types.Message, state: FSMContext): # إضافة state
+# --- Handlers ---
+
+@dp.message(commands=['start'])
+async def send_welcome(message: types.Message, state: FSMContext):
+    """Handles the /start command and initiates the email collection."""
+    logger.info(f"User {message.from_user.id} started the bot.")
     await message.answer("👋 مرحباً بك!\nأدخل بريدك الإلكتروني:")
-    await state.set_state(UserData.waiting_email) # تغيير: استخدام set_state
+    await state.set_state(UserData.waiting_email)
 
-
-# معالجة البريد الإلكتروني
-@dp.message(UserData.waiting_email) # تغيير: استخدام @dp.message
+@dp.message(UserData.waiting_email)
 async def process_email(message: types.Message, state: FSMContext):
+    """Processes the user's email."""
+    if "@" not in message.text or "." not in message.text:
+        await message.answer("❌ يرجى إدخال بريد إلكتروني صالح.")
+        return
+
     await state.update_data(email=message.text)
+    logger.info(f"User {message.from_user.id} entered email: {message.text}")
     await message.answer("✅ أدخل الرمز السري:")
-    await state.set_state(UserData.waiting_code) # تغيير: استخدام set_state
+    await state.set_state(UserData.waiting_code)
 
-# معالجة الرمز السري
-@dp.message(UserData.waiting_code) # تغيير: استخدام @dp.message
+@dp.message(UserData.waiting_code)
 async def process_code(message: types.Message, state: FSMContext):
+    """Processes the user's secret code."""
     await state.update_data(code=message.text)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[ # تغيير: طريقة إنشاء InlineKeyboardMarkup
-        InlineKeyboardButton(text="📋 نسخ عنوان الدفع", callback_data="copy")
-    ]])
-    await message.answer("💳 أرسل المبلغ إلى هذا العنوان:\n`TLxUzr...TRC20`", parse_mode="Markdown", reply_markup=keyboard)
-    await message.answer("📷 أرسل لقطة الشاشة كدليل على الدفع:")
-    await state.set_state(UserData.waiting_payment) # تغيير: استخدام set_state
+    logger.info(f"User {message.from_user.id} entered code.")
 
-# معالجة لقطة الشاشة (إثبات الدفع)
-@dp.message(F.photo, UserData.waiting_payment) # تغيير: استخدام @dp.message و F.photo
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📋 نسخ عنوان الدفع", callback_data="copy_address")
+    ]])
+    await message.answer(
+        "💳 أرسل المبلغ إلى هذا العنوان:\n`TLxUzr...TRC20`",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+    await message.answer("📷 أرسل لقطة الشاشة كدليل على الدفع:")
+    await state.set_state(UserData.waiting_payment)
+
+@dp.message(F.photo, UserData.waiting_payment)
 async def process_payment(message: types.Message, state: FSMContext):
+    """Processes the payment screenshot and saves user data."""
     data = await state.get_data()
-    file_id = message.photo[-1].file_id
+    file_id = message.photo[-1].file_id # Get the file_id of the largest photo
 
     try:
         async with db_pool.acquire() as conn:
-            await conn.execute('''
-                INSERT INTO users (telegram_id, email, code, payment_image)
-                VALUES ($1, $2, $3, $4)
-            ''', message.from_user.id, data['email'], data['code'], file_id)
-        await message.answer("✅ تم استلام الدفعة. سيتم التحقق يدوياً. شكراً!")
+            # Check if user already exists to prevent duplicate entries on retry
+            existing_user = await conn.fetchrow(
+                "SELECT id FROM users WHERE telegram_id = $1", message.from_user.id
+            )
+            if existing_user:
+                await conn.execute('''
+                    UPDATE users
+                    SET email = $2, code = $3, payment_image = $4
+                    WHERE telegram_id = $1
+                ''', message.from_user.id, data.get('email'), data.get('code'), file_id)
+                logger.info(f"User {message.from_user.id} updated their payment details.")
+                await message.answer("✅ تم تحديث بيانات دفعتك. سيتم التحقق يدوياً. شكراً!")
+            else:
+                await conn.execute('''
+                    INSERT INTO users (telegram_id, email, code, payment_image)
+                    VALUES ($1, $2, $3, $4)
+                ''', message.from_user.id, data.get('email'), data.get('code'), file_id)
+                logger.info(f"User {message.from_user.id} data saved successfully.")
+                await message.answer("✅ تم استلام دفعتك. سيتم التحقق يدوياً. شكراً!")
+    except asyncpg.exceptions.UniqueViolationError:
+        # This case is now handled by SELECT and UPDATE
+        logger.warning(f"Attempted to insert duplicate user {message.from_user.id}. Data updated instead.")
+        await message.answer("✅ تم تحديث بياناتك. سيتم التحقق يدوياً. شكراً!")
     except Exception as e:
-        logging.error(f"Error inserting data into DB: {e}")
+        logger.error(f"Error inserting/updating data for user {message.from_user.id}: {e}", exc_info=True)
         await message.answer("❌ حدث خطأ أثناء حفظ معلوماتك. الرجاء المحاولة مرة أخرى.")
     finally:
-        await state.clear() # تغيير: استخدام state.clear() بدلاً من state.finish()
+        await state.clear() # Clear state after processing
 
-# معالجة زر النسخ (للإظهار فقط، لا ينسخ فعلياً)
-@dp.callback_query(F.data == 'copy') # تغيير: استخدام @dp.callback_query و F.data
-async def copy_address(callback_query: types.CallbackQuery):
-    await callback_query.answer(text="📋 تم نسخ العنوان (انسخه يدوياً)") # تغيير: استخدام callback_query.answer
+@dp.callback_query(F.data == 'copy_address')
+async def copy_address_callback(callback_query: types.CallbackQuery):
+    """Handles the callback for copying the payment address."""
+    await callback_query.answer(text="📋 تم نسخ العنوان (انسخه يدوياً)", show_alert=True)
+    logger.info(f"User {callback_query.from_user.id} clicked copy address.")
 
-# دالة التشغيل عند بدء البوت (on_startup)
-async def on_startup(dispatcher):
+# --- Startup and Shutdown ---
+
+async def on_startup_tasks(dispatcher):
+    """Tasks to run on bot startup."""
     global db_pool
     db_pool = await create_db_pool()
     await init_db()
-    logging.info("✅ البوت جاهز للعمل...")
+    logger.info("Bot is ready and running!")
 
-# تشغيل البوت باستخدام Polling
+async def on_shutdown_tasks(dispatcher):
+    """Tasks to run on bot shutdown."""
+    if db_pool:
+        await db_pool.close()
+        logger.info("Database connection pool closed.")
+    logger.info("Bot has been shut down.")
+
+# Main function to run the bot
 async def main():
-    await on_startup(dp) # استدعاء دالة on_startup يدوياً
-    await dp.start_polling(bot, skip_updates=True) # طريقة التشغيل الجديدة في aiogram v3.x
+    """Main function to start the bot."""
+    dp.startup.register(on_startup_tasks)
+    dp.shutdown.register(on_shutdown_tasks)
+    await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == '__main__':
-    asyncio.run(main()) # تشغيل دالة main غير المتزامنة
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped manually (KeyboardInterrupt).")
+    except Exception as e:
+        logger.critical(f"An unhandled error occurred: {e}", exc_info=True)
+        
