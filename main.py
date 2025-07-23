@@ -6,7 +6,7 @@ import re
 from threading import Thread # هام للحفاظ على نشاط Replit
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup # لم تُستخدم هنا، لكن بقيت من النسخة الأصلية
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -205,5 +205,93 @@ async def process_capital(message: types.Message, state: FSMContext):
 
     await state.update_data(capital=capital)
     logger.info(f"User {message.from_user.id} provided capital: {capital}")
-    await message.answer("✅ تم استلام رأس المال.\nالآن، الرجاء إ
-    
+    await message.answer("✅ تم استلام رأس المال.\nالآن، الرجاء إرسال صورة إثبات الدفع:")
+    await state.set_state(UserData.waiting_payment)
+
+@dp.message(UserData.waiting_payment, F.photo)
+async def process_payment_photo(message: types.Message, state: FSMContext):
+    photo_file_id = message.photo[-1].file_id
+    await state.update_data(payment_image=photo_file_id)
+    logger.info(f"User {message.from_user.id} uploaded payment photo with file_id: {photo_file_id}")
+
+    user_data = await state.get_data()
+    telegram_id = message.from_user.id
+
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO users (telegram_id, email, password, age, experience, capital, payment_image)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (telegram_id) DO UPDATE
+                SET email = EXCLUDED.email,
+                    password = EXCLUDED.password,
+                    age = EXCLUDED.age,
+                    experience = EXCLUDED.experience,
+                    capital = EXCLUDED.capital,
+                    payment_image = EXCLUDED.payment_image;
+            ''',
+            telegram_id,
+            user_data['email'],
+            user_data['password'],
+            user_data['age'],
+            user_data['experience'],
+            user_data['capital'],
+            user_data['payment_image']
+            )
+        logger.info(f"User {telegram_id} data saved/updated in database.")
+        await message.answer(
+            "🎉 شكرًا لك! تم تسجيل جميع معلوماتك بنجاح.\n"
+            "سنتواصل معك قريباً لتقديم الدخول إلى برنامجنا."
+        )
+        await state.set_state(UserData.registered)
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Failed to save user {telegram_id} data to DB: {e}", exc_info=True)
+        await message.answer("❌ عذرًا، حدث خطأ أثناء حفظ معلوماتك. الرجاء حاول مرة أخرى لاحقًا.")
+        await state.clear()
+
+@dp.message(UserData.waiting_payment, ~F.photo)
+async def process_payment_invalid(message: types.Message):
+    await message.reply("❌ الرجاء إرسال صورة لإثبات الدفع، وليس نصاً أو أي نوع آخر من الملفات.")
+
+# --- دالة main لتشغيل البوت ---
+async def main():
+    global db_pool
+    logger.info("Starting bot initialization...")
+
+    # بدء خادم ويب Flask في خيط منفصل للحفاظ على نشاط Replit
+    keep_alive()
+    logger.info("Flask web server for keep-alive started.")
+
+    # إنشاء مجموعة اتصالات قاعدة البيانات
+    db_pool = await create_db_pool()
+    if db_pool is None:
+        logger.critical("Failed to acquire database pool. Exiting application.")
+        sys.exit("Critical Error: Database pool not available.")
+
+    # تهيئة جداول قاعدة البيانات
+    if not await init_db():
+        logger.critical("Failed to initialize database tables. Exiting application.")
+        sys.exit("Critical Error: Database tables could not be set up.")
+
+    logger.info("Database setup complete. Starting polling...")
+    # بدء تشغيل البوت (باستخدام Long Polling)
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.critical(f"Bot polling failed: {e}", exc_info=True)
+    finally:
+        # التأكد من إغلاق مجموعة اتصالات قاعدة البيانات عند توقف البوت
+        if db_pool:
+            await db_pool.close()
+            logger.info("Database connection pool closed.")
+
+# نقطة الدخول الرئيسية للسكريبت
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped manually.")
+    except Exception as e:
+        logger.critical(f"Unhandled exception in main execution: {e}", exc_info=True)
+        
