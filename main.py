@@ -1,145 +1,178 @@
+import os
+import logging
+import psycopg2
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.utils import executor
-import psycopg2
-import logging
-import os # لإدارة متغيرات البيئة
+from aiogram.utils.executor import start_webhook, start_polling # سنستخدم start_webhook
 
-# إعدادات تسجيل الدخول
+# --- إعدادات التسجيل ---
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# تعريف التوكن الخاص بالبوت
-# يُفضل استخدام متغيرات البيئة للتوكن والمعلومات الحساسة
-# API_TOKEN = os.getenv("BOT_TOKEN", "ضع_توكن_البوت_هنا_في_حالة_عدم_وجوده_كمتغير_بيئة")
-API_TOKEN = "TU_BOT_TOKEN" # !!! لا تنسى تغيير هذا بجدول التوكن الخاص بك !!!
+# --- تعريف متغيرات البيئة (مهم جداً لـ Render) ---
+# يجب عليك إضافة هذه المتغيرات في إعدادات Render كـ Environment Variables
+API_TOKEN = os.getenv("BOT_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL") # هذا أفضل لـ Render للاتصال بـ PostgreSQL
 
-# إعداد البوت والمخزن المؤقت
+# --- إعدادات Webhook (خاصة بـ Render) ---
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST") # URL لخدمة الويب الخاصة بك على Render (مثال: https://your-bot-name.onrender.com)
+WEBHOOK_PATH = f"/webhook/{API_TOKEN}" # مسار الـ Webhook
+WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+
+# --- إعداد البوت والمخزن المؤقت ---
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
-# إعداد الاتصال بقاعدة البيانات
-# يُفضل استخدام متغيرات البيئة لمعلومات قاعدة البيانات
-DB_NAME = os.getenv("DB_NAME", "DB_NAME") # استبدل 'DB_NAME' باسم قاعدة بياناتك
-DB_USER = os.getenv("DB_USER", "DB_USER") # استبدل 'DB_USER' باسم المستخدم
-DB_PASS = os.getenv("DB_PASS", "DB_PASS") # استبدل 'DB_PASS' بكلمة المرور
-DB_HOST = os.getenv("DB_HOST", "DB_HOST") # استبدل 'DB_HOST' بالمضيف
-DB_PORT = os.getenv("DB_PORT", "5432") # استبدل '5432' بالمنفذ إذا كان مختلفًا
+# --- إعداد الاتصال بقاعدة البيانات ---
+conn = None
+cursor = None
 
-conn = None # تهيئة المتغير خارج try بلوك
-cursor = None # تهيئة المتغير خارج try بلوك
+async def setup_db():
+    global conn, cursor
+    try:
+        # Render يستخدم DATABASE_URL لـ PostgreSQL
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        logger.info("تم الاتصال بقاعدة البيانات بنجاح.")
 
-try:
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASS,
-        host=DB_HOST,
-        port=DB_PORT
-    )
-    cursor = conn.cursor()
-    logger.info("تم الاتصال بقاعدة البيانات بنجاح.")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS program_sales (
+                id SERIAL PRIMARY KEY,
+                email VARCHAR(255) NOT NULL UNIQUE,
+                secret_code VARCHAR(255) NOT NULL,
+                payment_screenshot_file_id TEXT NOT NULL,
+                submission_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.commit()
+        logger.info("تم التحقق من جدول مبيعات البرنامج (program_sales) أو إنشاؤه.")
+        return True
+    except Exception as e:
+        logger.critical(f"فشل الاتصال بقاعدة البيانات أو إعداد الجدول: {e}", exc_info=True)
+        return False
 
-    # تأكد من وجود الجدول 'users' (اختياري، يمكنك القيام بذلك يدويًا أو عبر Migration)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            email VARCHAR(255) NOT NULL UNIQUE,
-            code VARCHAR(255) NOT NULL,
-            file_id TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    conn.commit()
-    logger.info("تم التحقق من جدول المستخدمين (users) أو إنشاؤه.")
-
-except Exception as e:
-    logger.error(f"فشل الاتصال بقاعدة البيانات: {e}")
-    # يمكنك هنا اتخاذ إجراءات أخرى، مثل إيقاف البوت
-    # exit(1) # لإيقاف التطبيق إذا فشل الاتصال بقاعدة البيانات
-
-# تعريف الحالات
-class Form(StatesGroup):
+# --- تعريف الحالات (Forms) ---
+class ProgramPurchase(StatesGroup):
     email = State()
-    code = State()
-    payment = State()
+    secret_code = State()
+    payment_proof = State()
 
-# بدء البوت
+# --- معالجات الأوامر والرسائل ---
+
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
-    # --- هذا هو السطر الجديد المضاف للتحقق ---
     logger.info(f"Received /start command from user: {message.from_user.id}")
-    # ----------------------------------------
-
-    # التأكد من أن قاعدة البيانات متصلة قبل البدء
     if conn is None or conn.closed:
         logger.error("البوت حاول البدء ولكن الاتصال بقاعدة البيانات غير موجود أو مغلق.")
         await message.answer("عذراً، هناك مشكلة فنية حالياً. يرجى المحاولة لاحقاً.")
         return
 
-    await Form.email.set()
-    await message.answer("👋 مرحبا بك! من فضلك أرسل بريدك الإلكتروني:")
+    await ProgramPurchase.email.set()
+    await message.answer(
+        "👋 مرحباً بك! هل أنت مستعد لتعلم أسرار التجارة الإلكترونية؟
+"
+        "للبدء، يرجى إرسال بريدك الإلكتروني للحصول على تفاصيل البرنامج:"
+    )
 
-@dp.message_handler(state=Form.email)
+@dp.message_handler(state=ProgramPurchase.email)
 async def process_email(message: types.Message, state: FSMContext):
-    user_email = message.text.strip() # إزالة المسافات البيضاء الزائدة
-
-    # يمكنك إضافة تحقق بسيط لنمط البريد الإلكتروني هنا إذا أردت
-    if "@" not in user_email or "." not in user_email:
-        await message.answer("❌ يبدو أن هذا ليس بريداً إلكترونياً صالحاً. يرجى إدخال بريد إلكتروني صحيح:")
+    user_email = message.text.strip()
+    if "@" not in user_email or "." not in user_email or len(user_email) < 5:
+        await message.answer("❌ هذا ليس بريداً إلكترونياً صالحاً. يرجى إدخال بريد إلكتروني صحيح:")
         return
 
     await state.update_data(email=user_email)
-    await Form.next()
-    await message.answer("✅ تم استلام البريد. الآن أرسل الرمز السري (8 أحرف أو أكثر):")
+    await ProgramPurchase.next()
+    await message.answer(
+        "✅ تم استلام بريدك الإلكتروني بنجاح! سيتم إرسال بعض التفاصيل إليك قريباً.
+"
+        "الآن، من فضلك أرسل الرمز السري الخاص بالبرنامج (8 أحرف أو أكثر):"
+    )
 
-@dp.message_handler(state=Form.code)
-async def process_code(message: types.Message, state: FSMContext):
-    user_code = message.text.strip()
-    if len(user_code) < 8:
-        await message.answer("❌ الرمز السري يجب أن يكون 8 أحرف أو أكثر. من فضلك أدخل رمزاً سرياً أطول:")
+@dp.message_handler(state=ProgramPurchase.secret_code)
+async def process_secret_code(message: types.Message, state: FSMContext):
+    code_text = message.text.strip()
+    if len(code_text) < 8:
+        await message.answer("❌ الرمز السري يجب أن يكون 8 أحرف أو أكثر. يرجى إدخال رمز سري أطول:")
         return
-    await state.update_data(code=user_code)
-    await Form.next()
-    await message.answer("💸 يرجى إرسال لقطة شاشة بعد الدفع الآن. تأكد من أنها صورة واضحة:")
 
-@dp.message_handler(content_types=['photo'], state=Form.payment)
-async def process_payment(message: types.Message, state: FSMContext):
-    file_id = message.photo[-1].file_id
+    await state.update_data(secret_code=code_text)
+    await ProgramPurchase.next()
+    await message.answer(
+        "💸 ممتاز! الرمز السري صحيح.
+"
+        "لإتمام عملية الشراء وتلقي البرنامج، يرجى إرسال لقطة شاشة (صورة) تثبت إتمام عملية الدفع."
+        "
+تأكد أن الصورة واضحة وتظهر تفاصيل الدفع."
+    )
+
+@dp.message_handler(content_types=types.ContentTypes.PHOTO, state=ProgramPurchase.payment_proof)
+async def process_payment_proof(message: types.Message, state: FSMContext):
+    file_id = message.photo[-1].file_id # الحصول على أكبر نسخة من الصورة
     user_data = await state.get_data()
 
     try:
         cursor.execute(
-            "INSERT INTO users (email, code, file_id) VALUES (%s, %s, %s)",
-            (user_data['email'], user_data['code'], file_id)
+            "INSERT INTO program_sales (email, secret_code, payment_screenshot_file_id) VALUES (%s, %s, %s)",
+            (user_data['email'], user_data['secret_code'], file_id)
         )
         conn.commit()
-        logger.info(f"تم حفظ بيانات المستخدم: {user_data['email']}")
-        await message.answer("✅ تم استلام إثبات الدفع بنجاح! سيتم مراجعته في أقرب وقت.")
+        logger.info(f"تم حفظ بيانات بيع البرنامج للمستخدم: {user_data['email']}")
+        await message.answer(
+            "🎉 رائع! تم استلام إثبات الدفع بنجاح.
+"
+            "فريقنا سيقوم بمراجعة الدفع في أقرب وقت ممكن. بعد التأكيد، ستتلقى البرنامج عبر البريد الإلكتروني الذي قدمته."
+            "
+شكراً لك لانضمامك إلى برنامج تعلم التجارة الإلكترونية!"
+        )
         await state.finish()
     except psycopg2.errors.UniqueViolation:
-        conn.rollback() # التراجع عن المعاملة في حالة وجود خطأ
-        logger.warning(f"محاولة تسجيل بريد إلكتروني موجود مسبقاً: {user_data['email']}")
-        await message.answer("⚠️ البريد الإلكتروني هذا مسجل لدينا بالفعل. يرجى استخدام بريد إلكتروني آخر أو التواصل مع الدعم.")
-        await state.finish() # إنهاء الحالة للسماح للمستخدم بالبدء من جديد
+        conn.rollback()
+        logger.warning(f"محاولة تسجيل بريد إلكتروني موجود مسبقاً في مبيعات البرنامج: {user_data['email']}")
+        await message.answer(
+            "⚠️ عذراً، يبدو أن هذا البريد الإلكتروني مسجل لدينا بالفعل ضمن طلب شراء سابق."
+            " إذا كنت تواجه مشكلة، يرجى التواصل مع الدعم."
+        )
+        await state.finish()
     except Exception as e:
-        conn.rollback() # التراجع عن المعاملة في حالة وجود خطأ
-        logger.error(f"خطأ أثناء حفظ البيانات في قاعدة البيانات: {e}", exc_info=True)
-        await message.answer("❌ حدث خطأ أثناء معالجة طلبك. يرجى المحاولة مرة أخرى لاحقًا أو التواصل مع الدعم.")
-        await state.finish() # إنهاء الحالة لتجنب التعليق
+        conn.rollback()
+        logger.error(f"خطأ أثناء حفظ بيانات مبيعات البرنامج في قاعدة البيانات: {e}", exc_info=True)
+        await message.answer(
+            "❌ حدث خطأ غير متوقع أثناء معالجة طلبك. يرجى المحاولة مرة أخرى لاحقًا أو التواصل مع الدعم."
+        )
+        await state.finish()
 
-@dp.message_handler(state=Form.payment)
-async def process_payment_invalid(message: types.Message, state: FSMContext):
-    # هذا المعالج سيتلقى أي رسالة ليست صورة في حالة Form.payment
-    await message.answer("❌ من فضلك أرسل لقطة شاشة (صورة) فقط لإثبات الدفع. لا ترسل نصًا.")
+@dp.message_handler(state=ProgramPurchase.payment_proof)
+async def process_payment_proof_invalid(message: types.Message, state: FSMContext):
+    # يتعامل مع الرسائل التي ليست صوراً في هذه الحالة
+    await message.answer("❌ من فضلك أرسل لقطة شاشة (صورة) فقط لإثبات الدفع. لا ترسل نصًا أو أنواع ملفات أخرى.")
 
-# إغلاق الاتصال بقاعدة البيانات عند إيقاف البوت
-async def on_shutdown(dispatcher: Dispatcher):
+# --- دوال بدء وإيقاف الـ Webhook ---
+
+async def on_startup(dp):
+    logger.info("Bot is starting up...")
+    db_ready = await setup_db()
+    if not db_ready:
+        logger.critical("فشل إعداد قاعدة البيانات. البوت لن يعمل بشكل صحيح.")
+        # يمكنك اختيار إيقاف البوت هنا إذا كان اتصال قاعدة البيانات حاسمًا
+        # exit(1)
+
+    # ضبط الـ webhook لـ Telegram API
+    webhook_set = await bot.set_webhook(WEBHOOK_URL)
+    if webhook_set:
+        logger.info(f"Webhook set to: {WEBHOOK_URL}")
+    else:
+        logger.error("فشل في ضبط الـ Webhook. تحقق من URL البوت وتوكن البوت.")
+
+async def on_shutdown(dp):
+    logger.info("Bot is shutting down...")
+    # حذف الـ webhook عند إيقاف البوت
+    await bot.delete_webhook()
+    logger.info("Webhook deleted.")
     if cursor:
         cursor.close()
         logger.info("تم إغلاق مؤشر قاعدة البيانات.")
@@ -147,10 +180,22 @@ async def on_shutdown(dispatcher: Dispatcher):
         conn.close()
         logger.info("تم إغلاق الاتصال بقاعدة البيانات.")
 
+# --- تشغيل البوت ---
 if __name__ == '__main__':
-    # تأكد من أن الاتصال بقاعدة البيانات قد تم بنجاح قبل بدء البوت
-    if conn:
-        executor.start_polling(dp, skip_updates=True, on_shutdown=on_shutdown)
-    else:
-        logger.critical("فشل بدء البوت بسبب عدم وجود اتصال بقاعدة البيانات.")
+    # تأكد أن جميع متغيرات البيئة الأساسية موجودة
+    if not API_TOKEN or not DATABASE_URL or not WEBHOOK_HOST:
+        logger.critical("متغيرات البيئة BOT_TOKEN, DATABASE_URL, WEBHOOK_HOST غير معرفة. البوت لا يمكن أن يبدأ.")
+        exit(1) # إيقاف البوت إذا كانت المتغيرات الأساسية مفقودة
+
+    # ابدأ تشغيل البوت كـ Webhook
+    # Render سيستخدم المنفذ الذي يوفره متغير البيئة PORT
+    start_webhook(
+        dispatcher=dp,
+        webhook_path=WEBHOOK_PATH,
+        on_startup=on_startup,
+        on_shutdown=on_shutdown,
+        skip_updates=True, # لا تفوت التحديثات القديمة أثناء بدء التشغيل
+        host='0.0.0.0', # عنوان الاستماع
+        port=int(os.getenv("PORT", 8080)) # المنفذ الذي يوفره Render
+    )
 
