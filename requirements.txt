@@ -2,3 +2,4 @@ aiogram
 asyncpg
 wheel
 setuptools
+Flask
