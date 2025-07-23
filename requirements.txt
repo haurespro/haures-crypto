@@ -1,5 +1,3 @@
-aiogram
-asyncpg
-wheel
-setuptools
-Flask
+aiogram==3.*
+asyncpg==0.*
+Flask==3.*
