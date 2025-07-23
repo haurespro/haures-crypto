@@ -3,70 +3,71 @@ import os
 import asyncio
 import sys
 import re
-from threading import Thread # New import for threading
+from threading import Thread # هام للحفاظ على نشاط Replit
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup # Not used, but kept from original
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup # لم تُستخدم هنا، لكن بقيت من النسخة الأصلية
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 import asyncpg
-from flask import Flask # New import for Flask web server
+from flask import Flask # هام للحفاظ على نشاط Replit
 
-# Configure logging
+# --- إعداد التسجيل (Logging) ---
+# سيسجل البوت كل الأحداث الهامة هنا
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Environment Variables ---
-# Fetch sensitive information from environment variables for security
+# --- متغيرات البيئة (Environment Variables) ---
+# تُجلب المعلومات الحساسة من متغيرات البيئة (Secrets في Replit) للأمان
 API_TOKEN = os.getenv("BOT_TOKEN")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_NAME = os.getenv("DB_NAME")
 DB_HOST = os.getenv("DB_HOST")
 
-# Crucial check: Exit if BOT_TOKEN is not set, as the bot cannot function without it.
+# تحقق حاسم: إذا لم يتم تعيين توكن البوت، لا يمكن للبوت العمل
 if not API_TOKEN:
     logger.critical("BOT_TOKEN environment variable is NOT SET. Please set it in your Replit secrets.")
     sys.exit("Critical Error: BOT_TOKEN is missing. Exiting application.")
 
-# --- Flask App for Keep-Alive ---
+# --- تطبيق Flask للحفاظ على نشاط Replit ---
 app = Flask(__name__)
 
 @app.route('/')
 def index():
     """
-    A simple web route to keep the Replit instance alive.
+    مسار ويب بسيط للحفاظ على نشاط Replit.
     """
     return "Bot is alive and running!"
 
 def run_flask_app():
     """
-    Runs the Flask web server in a separate thread.
-    Replit provides the PORT environment variable.
+    يشغل خادم ويب Flask في خيط منفصل.
+    Replit يوفر منفذًا (PORT) في متغير البيئة.
     """
-    port = int(os.environ.get('PORT', 8080)) # Default to 8080 if PORT isn't set by Replit
+    port = int(os.environ.get('PORT', 8080)) # المنفذ الافتراضي 8080 إذا لم يتم تعيينه بواسطة Replit
     logger.info(f"Starting Flask web server on 0.0.0.0:{port}")
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 def keep_alive():
     """
-    Starts the Flask web server in a background thread.
+    يبدأ خادم ويب Flask في خيط في الخلفية.
     """
     t = Thread(target=run_flask_app)
     t.start()
 
-# --- Bot and Dispatcher Setup ---
+# --- إعداد البوت و Dispatcher ---
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Global variable for database connection pool
+# متغير عام لمجموعة اتصالات قاعدة البيانات
 db_pool = None
 
 async def create_db_pool():
     """
-    Establishes and returns a PostgreSQL database connection pool using asyncpg.
-    Ensures all necessary DB environment variables are set.
+    يُنشئ ويعيد مجموعة اتصالات قاعدة بيانات PostgreSQL باستخدام asyncpg.
+    يتأكد من تعيين جميع متغيرات البيئة الضرورية لقاعدة البيانات.
     """
     if not all([DB_USER, DB_PASSWORD, DB_NAME, DB_HOST]):
         logger.critical("One or more database environment variables (DB_USER, DB_PASSWORD, DB_NAME, DB_HOST) are NOT SET! Please check your Replit secrets.")
@@ -86,11 +87,11 @@ async def create_db_pool():
         return pool
     except Exception as e:
         logger.critical(f"Failed to create database pool: {e}", exc_info=True)
-        sys.exit(f"Critical Error: Failed to create database pool: {e}") # Exit if DB connection fails
+        sys.exit(f"Critical Error: Failed to create database pool: {e}") # الخروج إذا فشل الاتصال بقاعدة البيانات
 
 async def init_db():
     """
-    Creates the 'users' table if it does not already exist.
+    يُنشئ جدول 'users' إذا لم يكن موجودًا بالفعل.
     """
     if db_pool is None:
         logger.error("Cannot initialize database: DB pool is not available.")
@@ -116,7 +117,7 @@ async def init_db():
         logger.critical(f"Failed to initialize database table 'users': {e}", exc_info=True)
         return False
 
-# --- FSM States ---
+# --- حالات FSM (مدير حالات Finite State Machine) ---
 class UserData(StatesGroup):
     waiting_email = State()
     waiting_password = State()
@@ -126,11 +127,12 @@ class UserData(StatesGroup):
     waiting_payment = State()
     registered = State()
 
-# --- Handlers ---
+# --- المعالجات (Handlers) ---
 
-@dp.message(F.command("start"))
+# **المعالجة لأمر /start - تم التعديل لاستخدام commands=["start"]**
+@dp.message(commands=["start"])
 async def send_welcome(message: types.Message, state: FSMContext):
-    await state.clear()
+    await state.clear() # مسح أي حالة سابقة للمستخدم
     user_id = message.from_user.id
     username = message.from_user.username if message.from_user.username else "لا يوجد اسم مستخدم"
     full_name = message.from_user.full_name
@@ -203,93 +205,5 @@ async def process_capital(message: types.Message, state: FSMContext):
 
     await state.update_data(capital=capital)
     logger.info(f"User {message.from_user.id} provided capital: {capital}")
-    await message.answer("✅ تم استلام رأس المال.\nالآن، الرجاء إرسال صورة إثبات الدفع:")
-    await state.set_state(UserData.waiting_payment)
-
-@dp.message(UserData.waiting_payment, F.photo)
-async def process_payment_photo(message: types.Message, state: FSMContext):
-    photo_file_id = message.photo[-1].file_id
-    await state.update_data(payment_image=photo_file_id)
-    logger.info(f"User {message.from_user.id} uploaded payment photo with file_id: {photo_file_id}")
-
-    user_data = await state.get_data()
-    telegram_id = message.from_user.id
-
-    try:
-        async with db_pool.acquire() as conn:
-            await conn.execute('''
-                INSERT INTO users (telegram_id, email, password, age, experience, capital, payment_image)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ON CONFLICT (telegram_id) DO UPDATE
-                SET email = EXCLUDED.email,
-                    password = EXCLUDED.password,
-                    age = EXCLUDED.age,
-                    experience = EXCLUDED.experience,
-                    capital = EXCLUDED.capital,
-                    payment_image = EXCLUDED.payment_image;
-            ''',
-            telegram_id,
-            user_data['email'],
-            user_data['password'],
-            user_data['age'],
-            user_data['experience'],
-            user_data['capital'],
-            user_data['payment_image']
-            )
-        logger.info(f"User {telegram_id} data saved/updated in database.")
-        await message.answer(
-            "🎉 شكرًا لك! تم تسجيل جميع معلوماتك بنجاح.\n"
-            "سنتواصل معك قريباً لتقديم الدخول إلى برنامجنا."
-        )
-        await state.set_state(UserData.registered)
-        await state.clear()
-    except Exception as e:
-        logger.error(f"Failed to save user {telegram_id} data to DB: {e}", exc_info=True)
-        await message.answer("❌ عذرًا، حدث خطأ أثناء حفظ معلوماتك. الرجاء حاول مرة أخرى لاحقًا.")
-        await state.clear()
-
-@dp.message(UserData.waiting_payment, ~F.photo)
-async def process_payment_invalid(message: types.Message):
-    await message.reply("❌ الرجاء إرسال صورة لإثبات الدفع، وليس نصاً أو أي نوع آخر من الملفات.")
-
-# --- Main function to run the bot ---
-async def main():
-    global db_pool
-    logger.info("Starting bot initialization...")
-
-    # Start the Flask web server in a separate thread to keep Replit alive
-    keep_alive()
-    logger.info("Flask web server for keep-alive started.")
-
-    # Create DB pool
-    db_pool = await create_db_pool()
-    if db_pool is None:
-        logger.critical("Failed to acquire database pool. Exiting application.")
-        sys.exit("Critical Error: Database pool not available.")
-
-    # Initialize DB tables
-    if not await init_db():
-        logger.critical("Failed to initialize database tables. Exiting application.")
-        sys.exit("Critical Error: Database tables could not be set up.")
-
-    logger.info("Database setup complete. Starting polling...")
-    # Start the bot (using Long Polling)
-    try:
-        await dp.start_polling(bot)
-    except Exception as e:
-        logger.critical(f"Bot polling failed: {e}", exc_info=True)
-    finally:
-        # Ensure database connection pool is closed when the bot stops
-        if db_pool:
-            await db_pool.close()
-            logger.info("Database connection pool closed.")
-
-# Entry point for the script
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped manually.")
-    except Exception as e:
-        logger.critical(f"Unhandled exception in main execution: {e}", exc_info=True)
-
+    await message.answer("✅ تم استلام رأس المال.\nالآن، الرجاء إ
+    
