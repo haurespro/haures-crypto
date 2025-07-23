@@ -228,7 +228,7 @@ async def process_payment_photo(message: types.Message, state: FSMContext):
                     age = EXCLUDED.age,
                     experience = EXCLUDED.experience,
                     capital = EXCLUDED.capital,
-                    payment_image = EXCLUDED.payment_image;
+                    payment_image = EXCLUDED.C;
             ''',
             telegram_id,
             user_data['email'],
