@@ -3,19 +3,17 @@ import os
 import asyncio
 import sys
 import re
+from threading import Thread # New import for threading
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup # لم يتم استخدام InlineKeyboardMarkup أو InlineKeyboardButton
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup # Not used, but kept from original
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 import asyncpg
+from flask import Flask # New import for Flask web server
 
-# If testing locally, you might want to use python-dotenv
-# from dotenv import load_dotenv
-# load_dotenv() # This will load variables from .env file
-
-# Configure logging to provide detailed information
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -29,8 +27,34 @@ DB_HOST = os.getenv("DB_HOST")
 
 # Crucial check: Exit if BOT_TOKEN is not set, as the bot cannot function without it.
 if not API_TOKEN:
-    logger.critical("BOT_TOKEN environment variable is NOT SET. Please set it in your deployment environment (e.g., Render).")
+    logger.critical("BOT_TOKEN environment variable is NOT SET. Please set it in your Replit secrets.")
     sys.exit("Critical Error: BOT_TOKEN is missing. Exiting application.")
+
+# --- Flask App for Keep-Alive ---
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    """
+    A simple web route to keep the Replit instance alive.
+    """
+    return "Bot is alive and running!"
+
+def run_flask_app():
+    """
+    Runs the Flask web server in a separate thread.
+    Replit provides the PORT environment variable.
+    """
+    port = int(os.environ.get('PORT', 8080)) # Default to 8080 if PORT isn't set by Replit
+    logger.info(f"Starting Flask web server on 0.0.0.0:{port}")
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+def keep_alive():
+    """
+    Starts the Flask web server in a background thread.
+    """
+    t = Thread(target=run_flask_app)
+    t.start()
 
 # --- Bot and Dispatcher Setup ---
 bot = Bot(token=API_TOKEN)
@@ -44,9 +68,8 @@ async def create_db_pool():
     Establishes and returns a PostgreSQL database connection pool using asyncpg.
     Ensures all necessary DB environment variables are set.
     """
-    # ممتاز: التحقق من جميع المتغيرات الأساسية لقاعدة البيانات قبل محاولة الاتصال
     if not all([DB_USER, DB_PASSWORD, DB_NAME, DB_HOST]):
-        logger.critical("One or more database environment variables (DB_USER, DB_PASSWORD, DB_NAME, DB_HOST) are NOT SET! Please check your deployment settings (e.g., Render).")
+        logger.critical("One or more database environment variables (DB_USER, DB_PASSWORD, DB_NAME, DB_HOST) are NOT SET! Please check your Replit secrets.")
         sys.exit("Critical Error: Missing critical database environment variables. Cannot connect to DB. Exiting application.")
 
     try:
@@ -57,28 +80,24 @@ async def create_db_pool():
             host=DB_HOST,
             min_size=1,
             max_size=10,
-            timeout=30 # ممتاز: إضافة مهلة لمحاولات الاتصال
+            timeout=30
         )
         logger.info("Database connection pool created successfully.")
         return pool
     except Exception as e:
         logger.critical(f"Failed to create database pool: {e}", exc_info=True)
-        return None # Return None if pool creation fails
+        sys.exit(f"Critical Error: Failed to create database pool: {e}") # Exit if DB connection fails
 
 async def init_db():
     """
     Creates the 'users' table if it does not already exist.
-    Ensures a unique constraint on 'telegram_id'.
-    Updated to include new fields: password, age, experience, capital.
     """
     if db_pool is None:
         logger.error("Cannot initialize database: DB pool is not available.")
-        return False # Indicate failure
+        return False
 
     try:
         async with db_pool.acquire() as conn:
-            # ممتاز: استخدام "IF NOT EXISTS" لتجنب الأخطاء إذا كان الجدول موجودًا
-            # ممتاز: UNIQUE على telegram_id
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
@@ -92,34 +111,26 @@ async def init_db():
                 );
             ''')
         logger.info("Database table 'users' checked/created successfully.")
-        return True # Indicate success
+        return True
     except Exception as e:
         logger.critical(f"Failed to initialize database table 'users': {e}", exc_info=True)
-        return False # Indicate failure
+        return False
 
 # --- FSM States ---
 class UserData(StatesGroup):
-    """
-    States for the Finite State Machine (FSM) to manage user input flow.
-    Updated to include new states.
-    """
     waiting_email = State()
     waiting_password = State()
     waiting_age = State()
     waiting_experience = State()
     waiting_capital = State()
     waiting_payment = State()
-    registered = State() # A final state to indicate completion
+    registered = State()
 
 # --- Handlers ---
 
 @dp.message(F.command("start"))
 async def send_welcome(message: types.Message, state: FSMContext):
-    """
-    Handles the /start command. Responds with a welcome message including
-    user info and prompts for email.
-    """
-    await state.clear() # ممتاز: مسح أي حالة سابقة لبداية جديدة
+    await state.clear()
     user_id = message.from_user.id
     username = message.from_user.username if message.from_user.username else "لا يوجد اسم مستخدم"
     full_name = message.from_user.full_name
@@ -136,28 +147,20 @@ async def send_welcome(message: types.Message, state: FSMContext):
 
 @dp.message(UserData.waiting_email, F.text)
 async def process_email(message: types.Message, state: FSMContext):
-    """
-    Handles the user's email input. Validates the email and moves to the next state.
-    """
     email = message.text
-    # ممتاز: التحقق الأساسي من صحة البريد الإلكتروني
     if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
         await message.reply("❌ هذا ليس بريدًا إلكترونيًا صالحًا. الرجاء إدخال بريد إلكتروني صحيح:")
-        return # Stay in the same state
+        return
 
-    await state.update_data(email=email) # Store the email
+    await state.update_data(email=email)
     logger.info(f"User {message.from_user.id} provided email: {email}")
     await message.answer("✅ تم استلام بريدك الإلكتروني بنجاح.\nالرجاء أدخل كلمة مرور:")
-    await state.set_state(UserData.waiting_password) # Move to the next state
+    await state.set_state(UserData.waiting_password)
 
 @dp.message(UserData.waiting_password, F.text)
 async def process_password(message: types.Message, state: FSMContext):
-    """
-    Handles the user's password input. Stores it and moves to the next state.
-    (يمكنك إضافة تحقق أقوى لكلمة المرور هنا)
-    """
     password = message.text
-    if len(password) < 6: # مثال على تحقق بسيط
+    if len(password) < 6:
         await message.reply("كلمة المرور قصيرة جدًا. يجب أن تكون 6 أحرف على الأقل:")
         return
 
@@ -170,7 +173,7 @@ async def process_password(message: types.Message, state: FSMContext):
 async def process_age(message: types.Message, state: FSMContext):
     try:
         age = int(message.text)
-        if not (0 < age < 100): # تحقق بسيط للعمر المنطقي
+        if not (0 < age < 100):
             await message.reply("❌ الرجاء إدخال عمر صالح (رقم بين 1 و 99):")
             return
         await state.update_data(age=age)
@@ -183,7 +186,7 @@ async def process_age(message: types.Message, state: FSMContext):
 @dp.message(UserData.waiting_experience, F.text)
 async def process_experience(message: types.Message, state: FSMContext):
     experience = message.text
-    if not experience.strip(): # جيد للتحقق من النص الفارغ أو المسافات البيضاء فقط
+    if not experience.strip():
         await message.reply("❌ الرجاء وصف مستوى خبرتك:")
         return
     await state.update_data(experience=experience)
@@ -196,19 +199,16 @@ async def process_capital(message: types.Message, state: FSMContext):
     capital = message.text
     if not capital.strip():
         await message.reply("❌ الرجاء إدخال رأس المال:")
-        return # Stay in this state if empty
+        return
 
     await state.update_data(capital=capital)
     logger.info(f"User {message.from_user.id} provided capital: {capital}")
     await message.answer("✅ تم استلام رأس المال.\nالآن، الرجاء إرسال صورة إثبات الدفع:")
-    await state.set_state(UserData.waiting_payment) # Move to the next state
+    await state.set_state(UserData.waiting_payment)
 
 @dp.message(UserData.waiting_payment, F.photo)
 async def process_payment_photo(message: types.Message, state: FSMContext):
-    """
-    Handles the payment photo. Stores the file_id and saves all user data to DB.
-    """
-    photo_file_id = message.photo[-1].file_id # Get the file_id of the largest photo
+    photo_file_id = message.photo[-1].file_id
     await state.update_data(payment_image=photo_file_id)
     logger.info(f"User {message.from_user.id} uploaded payment photo with file_id: {photo_file_id}")
 
@@ -217,8 +217,6 @@ async def process_payment_photo(message: types.Message, state: FSMContext):
 
     try:
         async with db_pool.acquire() as conn:
-            # ممتاز: استخدام ON CONFLICT (telegram_id) DO UPDATE
-            # هذا يضمن عدم وجود إدخالات مكررة لنفس المستخدم ويقوم بتحديث البيانات إذا حاول المستخدم التسجيل مرة أخرى
             await conn.execute('''
                 INSERT INTO users (telegram_id, email, password, age, experience, capital, payment_image)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -243,27 +241,25 @@ async def process_payment_photo(message: types.Message, state: FSMContext):
             "🎉 شكرًا لك! تم تسجيل جميع معلوماتك بنجاح.\n"
             "سنتواصل معك قريباً لتقديم الدخول إلى برنامجنا."
         )
-        await state.set_state(UserData.registered) # Set a final state
-        await state.clear() # مسح الحالة بعد التسجيل الناجح أمر جيد
+        await state.set_state(UserData.registered)
+        await state.clear()
     except Exception as e:
         logger.error(f"Failed to save user {telegram_id} data to DB: {e}", exc_info=True)
         await message.answer("❌ عذرًا، حدث خطأ أثناء حفظ معلوماتك. الرجاء حاول مرة أخرى لاحقًا.")
-        await state.clear() # مسح الحالة للسماح للمستخدم بالبدء من جديد إذا حدث خطأ
+        await state.clear()
 
 @dp.message(UserData.waiting_payment, ~F.photo)
 async def process_payment_invalid(message: types.Message):
-    """
-    Handles cases where user sends something other than a photo for payment.
-    """
     await message.reply("❌ الرجاء إرسال صورة لإثبات الدفع، وليس نصاً أو أي نوع آخر من الملفات.")
 
 # --- Main function to run the bot ---
 async def main():
-    """
-    Main function to start the bot and handle database initialization.
-    """
     global db_pool
     logger.info("Starting bot initialization...")
+
+    # Start the Flask web server in a separate thread to keep Replit alive
+    keep_alive()
+    logger.info("Flask web server for keep-alive started.")
 
     # Create DB pool
     db_pool = await create_db_pool()
@@ -277,13 +273,13 @@ async def main():
         sys.exit("Critical Error: Database tables could not be set up.")
 
     logger.info("Database setup complete. Starting polling...")
-    # Start the bot
+    # Start the bot (using Long Polling)
     try:
         await dp.start_polling(bot)
     except Exception as e:
         logger.critical(f"Bot polling failed: {e}", exc_info=True)
     finally:
-        # ممتاز: التأكد من إغلاق pool الاتصال بقاعدة البيانات عند توقف البوت
+        # Ensure database connection pool is closed when the bot stops
         if db_pool:
             await db_pool.close()
             logger.info("Database connection pool closed.")
@@ -297,4 +293,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"Unhandled exception in main execution: {e}", exc_info=True)
 
-                           
