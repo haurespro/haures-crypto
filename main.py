@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # تعريف التوكن الخاص بالبوت
 # يُفضل استخدام متغيرات البيئة للتوكن والمعلومات الحساسة
 # API_TOKEN = os.getenv("BOT_TOKEN", "ضع_توكن_البوت_هنا_في_حالة_عدم_وجوده_كمتغير_بيئة")
-API_TOKEN = "TU_BOT_TOKEN" # لا تنسى تغيير هذا بجدول التوكن الخاص بك
+API_TOKEN = "TU_BOT_TOKEN" # !!! لا تنسى تغيير هذا بجدول التوكن الخاص بك !!!
 
 # إعداد البوت والمخزن المؤقت
 bot = Bot(token=API_TOKEN)
@@ -72,6 +72,10 @@ class Form(StatesGroup):
 # بدء البوت
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
+    # --- هذا هو السطر الجديد المضاف للتحقق ---
+    logger.info(f"Received /start command from user: {message.from_user.id}")
+    # ----------------------------------------
+
     # التأكد من أن قاعدة البيانات متصلة قبل البدء
     if conn is None or conn.closed:
         logger.error("البوت حاول البدء ولكن الاتصال بقاعدة البيانات غير موجود أو مغلق.")
@@ -149,5 +153,4 @@ if __name__ == '__main__':
         executor.start_polling(dp, skip_updates=True, on_shutdown=on_shutdown)
     else:
         logger.critical("فشل بدء البوت بسبب عدم وجود اتصال بقاعدة البيانات.")
-
 
