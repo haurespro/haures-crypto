@@ -1,15 +1,18 @@
+import os
 import logging
+import asyncio
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import Message, FSInputFile
+from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import Command
-import asyncio
 
-API_TOKEN = "YOUR_BOT_TOKEN_HERE"  # ← ضع توكن البوت هنا
-
+# إعدادات التسجيل
 logging.basicConfig(level=logging.INFO)
+
+# جلب التوكن من المتغيرات البيئية (مناسب لـ Render)
+API_TOKEN = os.getenv("BOT_TOKEN")
 
 # إعداد البوت والمخزن المؤقت
 bot = Bot(token=API_TOKEN)
@@ -54,9 +57,9 @@ async def handle_payment(message: Message, state: FSMContext):
 
     data = await state.get_data()
     user_id = message.from_user.id
-    username = message.from_user.username
+    username = message.from_user.username or "بدون اسم مستخدم"
 
-    # سجل البيانات
+    # سجل البيانات في الطرفية
     log = (
         f"📥 New Submission:
 "
@@ -71,7 +74,6 @@ async def handle_payment(message: Message, state: FSMContext):
     print(log)
 
     await message.answer("✅ تم استلام معلوماتك بنجاح! سيتم مراجعة الدفع يدويًا قريبًا.")
-
     await state.clear()
 
 # في حال إرسال رسالة غير متوقعة
