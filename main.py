@@ -127,7 +127,7 @@ async def process_payment_proof(message: types.Message, state: FSMContext):
 """
            """فريقنا سيقوم بمراجعة الدفع في أقرب وقت ممكن. بعد التأكيد، ستتلقى البرنامج عبر البريد الإلكتروني الذي قدمته."
             """
-شكراً لك لانضمامك إلى برنامج تعلم التجارة الإلكترونية!"
+شكراً لك لانضمامك إلى برنامج تعلم التجارة الإلكترونية!"""
         )
         await state.finish()
     except psycopg2.errors.UniqueViolation:
