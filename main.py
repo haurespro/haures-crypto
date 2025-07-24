@@ -103,14 +103,10 @@ async def process_secret_code(message: types.Message, state: FSMContext):
     await state.update_data(secret_code=code_text)
     await ProgramPurchase.next()
     await message.answer(
-        """💸 ممتاز! الرمز السري صحيح.
-"""
-        """لإتمام عملية الشراء وتلقي البرنامج، يرجى إرسال لقطة شاشة (صورة) تثبت إتمام عملية الدفع."""
-        """
+    """💸 ممتاز! الرمز السري صحيح.
+لإتمام عملية الشراء وتلقي البرنامج، يرجى إرسال لقطة شاشة (صورة) تثبت إتمام عملية الدفع.
 تأكد أن الصورة واضحة وتظهر تفاصيل الدفع."""
-    )
-
-@dp.message_handler(content_types=types.ContentTypes.PHOTO, state=ProgramPurchase.payment_proof)
+)@dp.message_handler(content_types=types.ContentTypes.PHOTO, state=ProgramPurchase.payment_proof)
 async def process_payment_proof(message: types.Message, state: FSMContext):
     file_id = message.photo[-1].file_id # الحصول على أكبر نسخة من الصورة
     user_data = await state.get_data()
@@ -123,12 +119,10 @@ async def process_payment_proof(message: types.Message, state: FSMContext):
         conn.commit()
         logger.info(f"تم حفظ بيانات بيع البرنامج للمستخدم: {user_data['email']}")
         await message.answer(
-            """🎉 رائع! تم استلام إثبات الدفع بنجاح.
-"""
-           """فريقنا سيقوم بمراجعة الدفع في أقرب وقت ممكن. بعد التأكيد، ستتلقى البرنامج عبر البريد الإلكتروني الذي قدمته."""
-            """
+    """🎉 رائع! تم استلام إثبات الدفع بنجاح.
+فريقنا سيقوم بمراجعة الدفع في أقرب وقت ممكن. بعد التأكيد، ستتلقى البرنامج عبر البريد الإلكتروني الذي قدمته.
 شكراً لك لانضمامك إلى برنامج تعلم التجارة الإلكترونية!"""
-        )
+)
         await state.finish()
     except psycopg2.errors.UniqueViolation:
         conn.rollback()
